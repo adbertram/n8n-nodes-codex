@@ -1,0 +1,14 @@
+{
+  "node": "n8n-nodes-base.codex",
+  "nodeVersion": "1.0",
+  "codexVersion": "1.0",
+  "categories": ["AI", "Development"],
+  "resources": {
+    "credentialDocumentation": [],
+    "primaryDocumentation": [
+      {
+        "url": "https://developers.openai.com/codex/cli/"
+      }
+    ]
+  }
+}
