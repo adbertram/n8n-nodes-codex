@@ -96,6 +96,22 @@ Run the smoke test only in an environment where `codex` is installed and authent
 npm run smoke
 ```
 
+## Publishing
+
+This repository includes GitHub Actions workflows for CI and npm publishing.
+
+- `CI` runs on pull requests and pushes to `main`.
+- `Publish to npm` runs when a tag like `v0.1.0` is pushed.
+- The publish workflow requires an npm automation token stored as the GitHub repository secret `NPM_TOKEN`.
+- The tag name must match the package version in `package.json` with a leading `v`.
+
+Release example:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ## License
 
 MIT
