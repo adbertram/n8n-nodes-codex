@@ -16,7 +16,7 @@ This project is not affiliated with, endorsed by, or sponsored by OpenAI. OpenAI
 ## Requirements
 
 - n8n with community nodes enabled.
-- Node.js 20.15 or newer.
+- Node.js 22.0 or newer.
 - Codex CLI installed in the same host or container as n8n.
 - Codex CLI already authenticated and configured for the user that runs n8n.
 
