@@ -1,7 +1,7 @@
 {
   "name": "n8n-nodes-codex",
   "version": "0.1.0",
-  "description": "n8n community node that wraps the Codex native CLI (codex exec ...). No SDK dependency.",
+  "description": "Unofficial n8n community node for running prompts with the Codex CLI.",
   "keywords": [
     "n8n-community-node-package",
     "n8n",
@@ -17,13 +17,16 @@
   "engines": {
     "node": ">=20.15"
   },
-  "main": "index.js",
+  "main": "dist/nodes/Codex/Codex.node.js",
   "scripts": {
     "build": "rimraf dist && tsc && gulp build:icons",
+    "check": "npm run lint && npm run build && npm pack --dry-run --ignore-scripts",
     "dev": "tsc --watch",
     "format": "prettier nodes --write",
     "lint": "eslint \"nodes/**/*.ts\"",
-    "lintfix": "eslint \"nodes/**/*.ts\" --fix"
+    "lintfix": "eslint \"nodes/**/*.ts\" --fix",
+    "prepack": "npm run build",
+    "smoke": "node smoke-test.js"
   },
   "files": [
     "dist/nodes"
@@ -47,5 +50,13 @@
   },
   "peerDependencies": {
     "n8n-workflow": "*"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chikuwavlaster/n8n-nodes-codex.git"
+  },
+  "bugs": {
+    "url": "https://github.com/chikuwavlaster/n8n-nodes-codex/issues"
+  },
+  "homepage": "https://github.com/chikuwavlaster/n8n-nodes-codex#readme"
 }

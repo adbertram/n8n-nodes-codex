@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 60">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 60" role="img" aria-label="Codex CLI terminal icon">
   <rect width="60" height="60" rx="12" fill="#111827"/>
-  <path d="M30 12 45.6 21v18L30 48 14.4 39V21z" fill="none" stroke="#fff" stroke-width="4" stroke-linejoin="round"/>
-  <path d="M30 12v18l15.6-9M30 30 14.4 21M30 30v18" fill="none" stroke="#10A37F" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M16 22l10 8-10 8" fill="none" stroke="#f9fafb" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M32 39h13" fill="none" stroke="#38bdf8" stroke-width="5" stroke-linecap="round"/>
 </svg>

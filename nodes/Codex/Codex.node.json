@@ -2,10 +2,16 @@
   "node": "n8n-nodes-base.codex",
   "nodeVersion": "1.0",
   "codexVersion": "1.0",
-  "categories": ["AI", "Development"],
+  "categories": [
+    "Development",
+    "Utility"
+  ],
   "resources": {
     "credentialDocumentation": [],
     "primaryDocumentation": [
+      {
+        "url": "https://github.com/chikuwavlaster/n8n-nodes-codex#readme"
+      },
       {
         "url": "https://developers.openai.com/codex/cli/"
       }
