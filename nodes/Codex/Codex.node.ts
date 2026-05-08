@@ -667,30 +667,63 @@ function summarizeEvents(events: JsonEvent[]): CodexSummary {
 	};
 
 	for (const event of events) {
+		const payload = asRecord(event.payload);
 		const type = stringValue(event.type);
+		const payloadType = stringValue(payload?.type);
 		if (type) summary.lastEventType = type;
+		else if (payloadType) summary.lastEventType = payloadType;
 
 		const sessionId =
-			stringValue(event.session_id) ??
-			stringValue(event.sessionId) ??
-			stringValue(event.conversation_id) ??
-			stringValue(event.conversationId);
+			firstString(
+				event.session_id,
+				event.sessionId,
+				event.conversation_id,
+				event.conversationId,
+				payload?.session_id,
+				payload?.sessionId,
+				payload?.conversation_id,
+				payload?.conversationId,
+			);
 		if (sessionId && !summary.sessionId) summary.sessionId = sessionId;
 
-		const threadId = stringValue(event.thread_id) ?? stringValue(event.threadId);
+		const threadId = firstString(
+			event.thread_id,
+			event.threadId,
+			payload?.thread_id,
+			payload?.threadId,
+		);
 		if (threadId && !summary.threadId) summary.threadId = threadId;
 
-		const model = stringValue(event.model) ?? stringValue(getNested(event, ['message', 'model']));
+		const model = firstString(
+			event.model,
+			getNested(event, ['message', 'model']),
+			payload?.model,
+			getNested(payload, ['message', 'model']),
+		);
 		if (model && !summary.model) summary.model = model;
 
 		const status =
-			stringValue(event.status) ??
-			stringValue(event.outcome) ??
-			stringValue(event.terminal_reason);
+			firstString(
+				event.status,
+				event.outcome,
+				event.terminal_reason,
+				payload?.status,
+				payload?.outcome,
+				payload?.terminal_reason,
+			);
 		if (status) summary.status = status;
 
 		if (event.usage !== undefined) summary.usage = event.usage;
-		if (event.error !== undefined || event.is_error === true || type?.includes('error')) {
+		else if (payload?.usage !== undefined) summary.usage = payload.usage;
+
+		if (
+			event.error !== undefined ||
+			payload?.error !== undefined ||
+			event.is_error === true ||
+			payload?.is_error === true ||
+			type?.includes('error') ||
+			payloadType?.includes('error')
+		) {
 			summary.isError = true;
 		}
 
@@ -717,37 +750,51 @@ function summarizeEvents(events: JsonEvent[]): CodexSummary {
 }
 
 function extractMessage(event: JsonEvent): MessageSummary | undefined {
-	const message = asRecord(event.message);
-	if (message) {
-		const role = stringValue(message.role) ?? inferRole(event) ?? 'assistant';
-		const content = message.content ?? message.text ?? message.message;
-		return {
-			role,
-			content,
-			text: extractText(content),
-		};
-	}
-
-	const item = asRecord(event.item);
-	if (item && (item.type === 'message' || item.role !== undefined)) {
-		const role = stringValue(item.role) ?? inferRole(event) ?? 'assistant';
-		const content = item.content ?? item.text ?? item.message;
-		return {
-			role,
-			content,
-			text: extractText(content),
-		};
-	}
-
-	const type = stringValue(event.type) ?? '';
-	if (type.includes('message')) {
-		const text = stringValue(event.text) ?? stringValue(event.message);
-		if (text) {
+	for (const source of eventSources(event)) {
+		const message = asRecord(source.message);
+		if (message) {
+			const role = stringValue(message.role) ?? inferRoleFromSource(source, event) ?? 'assistant';
+			const content = message.content ?? message.text ?? message.message;
 			return {
-				role: inferRole(event) ?? 'assistant',
-				content: text,
-				text,
+				role,
+				content,
+				text: extractText(content),
 			};
+		}
+
+		const item = asRecord(source.item);
+		if (item && (item.type === 'message' || item.role !== undefined)) {
+			const role = stringValue(item.role) ?? inferRoleFromSource(source, event) ?? 'assistant';
+			const content = item.content ?? item.text ?? item.message;
+			return {
+				role,
+				content,
+				text: extractText(content),
+			};
+		}
+
+		const sourceType = typeForSource(source, event);
+		if (sourceType === 'message' || source.role !== undefined) {
+			const content = source.content ?? source.text ?? source.message;
+			if (content !== undefined) {
+				return {
+					role: stringValue(source.role) ?? inferRoleFromSource(source, event) ?? 'assistant',
+					content,
+					text: extractText(content),
+				};
+			}
+		}
+
+		if (sourceType.includes('message')) {
+			const content = source.text ?? source.message ?? source.content;
+			const text = extractText(content);
+			if (text) {
+				return {
+					role: inferRoleFromSource(source, event) ?? 'assistant',
+					content,
+					text,
+				};
+			}
 		}
 	}
 
@@ -755,43 +802,63 @@ function extractMessage(event: JsonEvent): MessageSummary | undefined {
 }
 
 function extractToolCall(event: JsonEvent): ToolCallSummary | undefined {
-	const item = asRecord(event.item);
-	const source = item ?? event;
-	const type = stringValue(source.type) ?? stringValue(event.type) ?? '';
-	if (!type.includes('tool') && source.name === undefined && source.tool_name === undefined) {
-		return undefined;
+	for (const eventSource of eventSources(event)) {
+		const item = asRecord(eventSource.item);
+		const source = item ?? eventSource;
+		const type = typeForSource(source, event);
+		if (
+			!type.includes('tool') &&
+			!type.includes('function_call') &&
+			source.name === undefined &&
+			source.tool_name === undefined
+		) {
+			continue;
+		}
+
+		return {
+			id: firstString(source.id, source.call_id),
+			name:
+				firstString(source.name, source.tool_name, getNested(source, ['function', 'name'])),
+			status: stringValue(source.status),
+			input: source.input ?? source.arguments ?? getNested(source, ['function', 'arguments']),
+			output: source.output ?? source.result,
+		};
 	}
 
-	return {
-		id: stringValue(source.id) ?? stringValue(source.call_id),
-		name:
-			stringValue(source.name) ??
-			stringValue(source.tool_name) ??
-			stringValue(getNested(source, ['function', 'name'])),
-		status: stringValue(source.status),
-		input: source.input ?? source.arguments ?? getNested(source, ['function', 'arguments']),
-		output: source.output ?? source.result,
-	};
+	return undefined;
 }
 
 function extractExplicitFinalText(event: JsonEvent): string | undefined {
-	const type = stringValue(event.type) ?? '';
-	if (
+	const types = eventSources(event).map((source) => typeForSource(source, event));
+	if (types.some(isFinalEventType)) {
+		for (const source of eventSources(event)) {
+			const text =
+				firstString(
+					source.last_agent_message,
+					source.lastAgentMessage,
+					source.final_response,
+					source.finalResponse,
+					source.response,
+					source.output,
+					source.text,
+				) ??
+				extractText(source.message) ??
+				extractText(source.content);
+			if (text) return text;
+		}
+	}
+	return undefined;
+}
+
+function isFinalEventType(type: string): boolean {
+	return (
 		type.includes('final') ||
 		type === 'agent_message' ||
 		type === 'response.completed' ||
-		type === 'turn.completed'
-	) {
-		return (
-			stringValue(event.final_response) ??
-			stringValue(event.finalResponse) ??
-			stringValue(event.response) ??
-			stringValue(event.output) ??
-			stringValue(event.text) ??
-			extractText(event.message)
-		);
-	}
-	return undefined;
+		type === 'turn.completed' ||
+		type === 'task_complete' ||
+		type === 'task.completed'
+	);
 }
 
 function extractText(value: unknown): string | undefined {
@@ -813,12 +880,29 @@ function extractText(value: unknown): string | undefined {
 	);
 }
 
-function inferRole(event: JsonEvent): string | undefined {
-	const type = stringValue(event.type) ?? '';
+function inferRoleFromSource(
+	source: Record<string, unknown>,
+	event: JsonEvent,
+): string | undefined {
+	return stringValue(source.role) ?? inferRoleFromType(typeForSource(source, event));
+}
+
+function inferRoleFromType(type: string): string | undefined {
 	if (type.includes('assistant') || type.includes('agent')) return 'assistant';
 	if (type.includes('user')) return 'user';
 	if (type.includes('system')) return 'system';
 	return undefined;
+}
+
+function eventSources(event: JsonEvent): Record<string, unknown>[] {
+	const sources: Record<string, unknown>[] = [event];
+	const payload = asRecord(event.payload);
+	if (payload) sources.push(payload);
+	return sources;
+}
+
+function typeForSource(source: Record<string, unknown>, event: JsonEvent): string {
+	return stringValue(source.type) ?? (source === event ? undefined : stringValue(event.type)) ?? '';
 }
 
 function splitList(value: string | undefined): string[] {
@@ -863,4 +947,12 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function stringValue(value: unknown): string | undefined {
 	return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function firstString(...values: unknown[]): string | undefined {
+	for (const value of values) {
+		const text = stringValue(value);
+		if (text) return text;
+	}
+	return undefined;
 }

@@ -1,4 +1,4 @@
-# n8n-nodes-codex
+# @oden-kun/n8n-nodes-codex
 
 Unofficial n8n community node for running prompts with the Codex CLI.
 
@@ -31,13 +31,13 @@ codex exec --help
 Install the package from n8n's Community Nodes settings:
 
 ```text
-n8n-nodes-codex
+@oden-kun/n8n-nodes-codex
 ```
 
 For manual self-hosted installs, install it into the n8n environment using npm:
 
 ```sh
-npm install n8n-nodes-codex
+npm install @oden-kun/n8n-nodes-codex
 ```
 
 Restart n8n after installation if your deployment does not reload community nodes automatically.
@@ -102,7 +102,7 @@ This repository includes GitHub Actions workflows for CI and npm publishing.
 
 - `CI` runs on pull requests and pushes to `main`.
 - `Publish to npm` runs when a tag like `v0.1.0` is pushed.
-- The publish workflow requires an npm automation token stored as the GitHub repository secret `NPM_TOKEN`.
+- The publish workflow uses npm Trusted Publishing with GitHub Actions OIDC. npm requires the package to already exist before configuring a trusted publisher, so do the first publish with a temporary npm token, then configure `publish.yml` as a trusted publisher in the npm package settings.
 - The tag name must match the package version in `package.json` with a leading `v`.
 
 Release example:

@@ -1,5 +1,5 @@
 {
-  "name": "n8n-nodes-codex",
+  "name": "@oden-kun/n8n-nodes-codex",
   "version": "0.1.0",
   "description": "Unofficial n8n community node for running prompts with the Codex CLI.",
   "keywords": [
@@ -31,6 +31,9 @@
   "files": [
     "dist/nodes"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "n8n": {
     "n8nNodesApiVersion": 1,
     "nodes": [
