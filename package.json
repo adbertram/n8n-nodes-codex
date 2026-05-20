@@ -1,5 +1,5 @@
 {
-  "name": "@oden-kun/n8n-nodes-codex",
+  "name": "@adbertram/n8n-nodes-codex",
   "version": "0.1.5",
   "description": "Unofficial n8n community node for running prompts with the Codex CLI.",
   "keywords": [
