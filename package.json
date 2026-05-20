@@ -53,10 +53,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/chikuwavlaster/n8n-nodes-codex.git"
+    "url": "git+https://github.com/adbertram/n8n-nodes-codex.git"
   },
   "bugs": {
-    "url": "https://github.com/chikuwavlaster/n8n-nodes-codex/issues"
+    "url": "https://github.com/adbertram/n8n-nodes-codex/issues"
   },
-  "homepage": "https://github.com/chikuwavlaster/n8n-nodes-codex#readme"
+  "homepage": "https://github.com/adbertram/n8n-nodes-codex#readme"
 }
