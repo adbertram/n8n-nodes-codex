@@ -1,5 +1,5 @@
 {
-  "name": "@oden-kun/n8n-nodes-codex",
+  "name": "n8n-nodes-codex",
   "version": "0.1.5",
   "description": "Unofficial n8n community node for running prompts with the Codex CLI.",
   "keywords": [
@@ -11,9 +11,6 @@
     "ai"
   ],
   "license": "MIT",
-  "author": {
-    "name": "kohei"
-  },
   "engines": {
     "node": ">=22.0.0"
   },
@@ -51,12 +48,5 @@
   "peerDependencies": {
     "n8n-workflow": "*"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/adbertram/n8n-nodes-codex.git"
-  },
-  "bugs": {
-    "url": "https://github.com/adbertram/n8n-nodes-codex/issues"
-  },
-  "homepage": "https://github.com/adbertram/n8n-nodes-codex#readme"
+  "homepage": ""
 }
