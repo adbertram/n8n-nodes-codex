@@ -1,6 +1,6 @@
 {
   "name": "@oden-kun/n8n-nodes-codex",
-  "version": "0.1.0",
+  "version": "0.1.5",
   "description": "Unofficial n8n community node for running prompts with the Codex CLI.",
   "keywords": [
     "n8n-community-node-package",
@@ -19,13 +19,12 @@
   },
   "main": "dist/nodes/Codex/Codex.node.js",
   "scripts": {
-    "build": "rimraf dist && tsc && gulp build:icons",
+    "build": "rimraf dist && tsc && mkdir -p dist/nodes/Codex && cp nodes/Codex/*.svg dist/nodes/Codex/",
     "check": "npm run lint && npm run build && npm pack --dry-run --ignore-scripts",
     "dev": "tsc --watch",
     "format": "prettier nodes --write",
     "lint": "eslint \"nodes/**/*.ts\"",
     "lintfix": "eslint \"nodes/**/*.ts\" --fix",
-    "prepack": "npm run build",
     "smoke": "node smoke-test.js"
   },
   "files": [
@@ -44,8 +43,6 @@
     "@types/node": "^22.0.0",
     "@typescript-eslint/parser": "^8.32.0",
     "eslint": "^8.57.0",
-    "eslint-plugin-n8n-nodes-base": "^1.16.3",
-    "gulp": "^5.0.0",
     "n8n-workflow": "*",
     "prettier": "^3.5.3",
     "rimraf": "^6.0.1",

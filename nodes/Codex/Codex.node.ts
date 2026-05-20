@@ -2,16 +2,121 @@ import {
 	IDataObject,
 	IExecuteFunctions,
 	INodeExecutionData,
+	INodeProperties,
+	INodePropertyOptions,
 	INodeType,
 	INodeTypeDescription,
 	NodeOperationError,
 } from 'n8n-workflow';
 import { spawn } from 'child_process';
+import { promises as fs } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
-type OutputFormat = 'text' | 'structured' | 'json';
-type ResumeMode = 'new' | 'last' | 'sessionId';
-type SandboxMode = 'default' | 'read-only' | 'workspace-write' | 'danger-full-access';
-type ApprovalPolicy = 'default' | 'untrusted' | 'on-request' | 'never';
+const RUN_PROMPT_OPERATION = [
+	{
+		name: 'Run Prompt',
+		value: 'runPrompt',
+		description: 'Send a prompt to Codex and capture the response',
+		action: 'Run a prompt',
+	},
+] as const;
+
+const OUTPUT_FORMAT_OPTIONS = [
+	{
+		name: 'Text (final CLI Output)',
+		value: 'text',
+		description: 'Return the Codex CLI stdout as text',
+	},
+	{
+		name: 'Structured (parsed events)',
+		value: 'structured',
+		description: 'Run with --json and return a parsed summary',
+	},
+	{
+		name: 'Raw JSON Events',
+		value: 'json',
+		description: 'Run with --json and return every JSONL event as an array',
+	},
+] as const;
+
+const MODEL_OPTIONS = [
+	{ name: 'Default', value: '' },
+	{ name: 'GPT-5.5', value: 'gpt-5.5' },
+	{ name: 'GPT-5.4', value: 'gpt-5.4' },
+	{ name: 'GPT-5.4 Mini', value: 'gpt-5.4-mini' },
+	{ name: 'GPT-5.3 Codex', value: 'gpt-5.3-codex' },
+	{ name: 'GPT-5.2 Codex', value: 'gpt-5.2-codex' },
+	{ name: 'GPT-5.1 Codex', value: 'gpt-5.1-codex' },
+	{ name: 'Custom', value: 'custom' },
+] as const;
+
+const RESUME_MODE_OPTIONS = [
+	{ name: 'New Session', value: 'new' },
+	{ name: 'Resume Most Recent (--last)', value: 'last' },
+	{ name: 'Resume by Session ID', value: 'sessionId' },
+] as const;
+
+const SANDBOX_MODE_OPTIONS = [
+	{ name: 'Default', value: 'default' },
+	{ name: 'Read Only', value: 'read-only' },
+	{ name: 'Workspace Write', value: 'workspace-write' },
+	{ name: 'Danger Full Access', value: 'danger-full-access' },
+] as const;
+
+const APPROVAL_POLICY_OPTIONS = [
+	{ name: 'Default', value: 'default' },
+	{ name: 'Untrusted', value: 'untrusted' },
+	{ name: 'On Request', value: 'on-request' },
+	{ name: 'Never', value: 'never' },
+] as const;
+
+const LOCAL_PROVIDER_OPTIONS = [
+	{ name: 'Default', value: '' },
+	{ name: 'LM Studio', value: 'lmstudio' },
+	{ name: 'Ollama', value: 'ollama' },
+] as const;
+
+const REASONING_EFFORT_OPTIONS = [
+	{ name: 'Default', value: 'default' },
+	{ name: 'Minimal', value: 'minimal' },
+	{ name: 'Low', value: 'low' },
+	{ name: 'Medium', value: 'medium' },
+	{ name: 'High', value: 'high' },
+	{ name: 'XHigh', value: 'xhigh' },
+] as const;
+
+const REASONING_SUMMARY_OPTIONS = [
+	{ name: 'Default', value: 'default' },
+	{ name: 'Auto', value: 'auto' },
+	{ name: 'Concise', value: 'concise' },
+	{ name: 'Detailed', value: 'detailed' },
+	{ name: 'None', value: 'none' },
+] as const;
+
+const VERBOSITY_OPTIONS = [
+	{ name: 'Default', value: 'default' },
+	{ name: 'Low', value: 'low' },
+	{ name: 'Medium', value: 'medium' },
+	{ name: 'High', value: 'high' },
+] as const;
+
+const WEB_SEARCH_OPTIONS = [
+	{ name: 'Default', value: 'default' },
+	{ name: 'Disabled', value: 'disabled' },
+	{ name: 'Cached', value: 'cached' },
+	{ name: 'Live', value: 'live' },
+] as const;
+
+type OutputFormat = (typeof OUTPUT_FORMAT_OPTIONS)[number]['value'];
+type ModelSelection = (typeof MODEL_OPTIONS)[number]['value'];
+type ResumeMode = (typeof RESUME_MODE_OPTIONS)[number]['value'];
+type SandboxMode = (typeof SANDBOX_MODE_OPTIONS)[number]['value'];
+type ApprovalPolicy = (typeof APPROVAL_POLICY_OPTIONS)[number]['value'];
+type ReasoningEffort = (typeof REASONING_EFFORT_OPTIONS)[number]['value'];
+type ReasoningSummary = (typeof REASONING_SUMMARY_OPTIONS)[number]['value'];
+type ModelVerbosity = (typeof VERBOSITY_OPTIONS)[number]['value'];
+type WebSearchMode = (typeof WEB_SEARCH_OPTIONS)[number]['value'];
 
 interface JsonEvent {
 	type?: string;
@@ -21,6 +126,11 @@ interface JsonEvent {
 interface EnvVarItem {
 	name: string;
 	value: string;
+}
+
+interface PreparedSchemaFile {
+	path: string | undefined;
+	cleanup: () => Promise<void>;
 }
 
 interface MessageSummary {
@@ -52,6 +162,251 @@ interface CodexSummary {
 	rawFinalEvent: unknown;
 }
 
+interface FixedCollectionField {
+	displayName: string;
+	name: string;
+	placeholder?: string;
+}
+
+function optionProperty(
+	displayName: string,
+	name: string,
+	options: readonly INodePropertyOptions[],
+	defaultValue: string,
+	description?: string,
+	extra: Partial<INodeProperties> = {},
+): INodeProperties {
+	return {
+		displayName,
+		name,
+		type: 'options',
+		options: [...options],
+		default: defaultValue,
+		...(description ? { description } : {}),
+		...extra,
+	};
+}
+
+function stringProperty(
+	displayName: string,
+	name: string,
+	description?: string,
+	extra: Partial<INodeProperties> = {},
+): INodeProperties {
+	return {
+		displayName,
+		name,
+		type: 'string',
+		default: '',
+		...(description ? { description } : {}),
+		...extra,
+	};
+}
+
+function booleanProperty(
+	displayName: string,
+	name: string,
+	description: string,
+	extra: Partial<INodeProperties> = {},
+): INodeProperties {
+	return {
+		displayName,
+		name,
+		type: 'boolean',
+		default: false,
+		description,
+		...extra,
+	};
+}
+
+function fixedCollectionProperty(config: {
+	displayName: string;
+	name: string;
+	placeholder: string;
+	itemName: string;
+	itemDisplayName: string;
+	fields: readonly FixedCollectionField[];
+	description?: string;
+}): INodeProperties {
+	return {
+		displayName: config.displayName,
+		name: config.name,
+		type: 'fixedCollection',
+		placeholder: config.placeholder,
+		typeOptions: {
+			multipleValues: true,
+		},
+		default: {},
+		options: [
+			{
+				name: config.itemName,
+				displayName: config.itemDisplayName,
+				values: config.fields.map((field) => ({
+					displayName: field.displayName,
+					name: field.name,
+					type: 'string',
+					default: '',
+					...(field.placeholder ? { placeholder: field.placeholder } : {}),
+				})),
+			},
+		],
+		...(config.description ? { description: config.description } : {}),
+	};
+}
+
+const ADDITIONAL_OPTION_PROPERTIES: INodeProperties[] = [
+	fixedCollectionProperty({
+		displayName: 'Add Directories',
+		name: 'addDirs',
+		placeholder: 'Add Directory',
+		itemName: 'directory',
+		itemDisplayName: 'Directory',
+		fields: [{ displayName: 'Path', name: 'path', placeholder: '/data/shared' }],
+		description: 'Additional writable directories passed with repeated --add-dir flags',
+	}),
+	stringProperty('Codex Binary Path', 'codexBinaryPath', 'Path to the codex executable', {
+		default: 'codex',
+	}),
+	fixedCollectionProperty({
+		displayName: 'Config Overrides',
+		name: 'configOverrides',
+		placeholder: 'Add Override',
+		itemName: 'override',
+		itemDisplayName: 'Override',
+		fields: [
+			{ displayName: 'Key', name: 'key', placeholder: 'model_reasoning_effort' },
+			{ displayName: 'Value', name: 'value', placeholder: '"high"' },
+		],
+		description: 'Additional -c key=value overrides. String values must include TOML quotes.',
+	}),
+	fixedCollectionProperty({
+		displayName: 'Disable Features',
+		name: 'disableFeatures',
+		placeholder: 'Add Feature',
+		itemName: 'feature',
+		itemDisplayName: 'Feature',
+		fields: [{ displayName: 'Name', name: 'name' }],
+		description: 'Feature flags passed with repeated --disable flags',
+	}),
+	fixedCollectionProperty({
+		displayName: 'Enable Features',
+		name: 'enableFeatures',
+		placeholder: 'Add Feature',
+		itemName: 'feature',
+		itemDisplayName: 'Feature',
+		fields: [{ displayName: 'Name', name: 'name' }],
+		description: 'Feature flags passed with repeated --enable flags',
+	}),
+	fixedCollectionProperty({
+		displayName: 'Environment Variables',
+		name: 'envVars',
+		placeholder: 'Add Variable',
+		itemName: 'env',
+		itemDisplayName: 'Variable',
+		fields: [
+			{ displayName: 'Name', name: 'name' },
+			{ displayName: 'Value', name: 'value' },
+		],
+	}),
+	booleanProperty('Ephemeral', 'ephemeral', 'Whether to run without persisting session files'),
+	booleanProperty('Ignore Project Rules', 'ignoreRules', 'Whether to add --ignore-rules'),
+	booleanProperty('Ignore User Config', 'ignoreUserConfig', 'Whether to add --ignore-user-config'),
+	fixedCollectionProperty({
+		displayName: 'Images',
+		name: 'images',
+		placeholder: 'Add Image',
+		itemName: 'image',
+		itemDisplayName: 'Image',
+		fields: [{ displayName: 'Path', name: 'path', placeholder: '/data/image.png' }],
+		description: 'Images passed with repeated --image flags',
+	}),
+	optionProperty('Local Provider', 'localProvider', LOCAL_PROVIDER_OPTIONS, ''),
+	booleanProperty(
+		'Network Access',
+		'networkAccess',
+		'Whether to allow network access in the workspace-write sandbox using sandbox_workspace_write.network_access=true',
+	),
+	stringProperty(
+		'Output Last Message File',
+		'outputLastMessageFile',
+		'Path passed to --output-last-message',
+	),
+	{
+		displayName: 'Output Schema JSON',
+		name: 'outputSchemaJson',
+		type: 'json',
+		default: '',
+		description: 'JSON Schema content. The node writes it to a temporary file and passes --output-schema.',
+	},
+	stringProperty(
+		'Output Schema File',
+		'outputSchemaFile',
+		'Existing JSON Schema file passed to --output-schema',
+	),
+	stringProperty('Profile', 'profile', 'Configuration profile from config.toml'),
+	stringProperty(
+		'Profile V2',
+		'profileV2',
+		'Config layer loaded from $CODEX_HOME/<name>.config.toml',
+	),
+	optionProperty(
+		'Reasoning Effort',
+		'reasoningEffort',
+		REASONING_EFFORT_OPTIONS,
+		'default',
+		'Sets model_reasoning_effort for supported models',
+	),
+	optionProperty(
+		'Reasoning Summary',
+		'reasoningSummary',
+		REASONING_SUMMARY_OPTIONS,
+		'default',
+		'Sets model_reasoning_summary for supported models',
+	),
+	booleanProperty(
+		'Skip Git Repo Check',
+		'skipGitRepoCheck',
+		'Whether to allow running Codex outside a Git repository',
+	),
+	booleanProperty(
+		'Strict Config',
+		'strictConfig',
+		'Whether Codex should error on unrecognized config.toml fields',
+	),
+	{
+		displayName: 'Timeout (Seconds)',
+		name: 'timeout',
+		type: 'number',
+		default: 600,
+		description: 'Kill the codex process after this many seconds',
+	},
+	optionProperty(
+		'Verbosity',
+		'verbosity',
+		VERBOSITY_OPTIONS,
+		'default',
+		'Sets model_verbosity for supported models',
+	),
+	booleanProperty('Use OSS Provider', 'oss', 'Whether to add --oss'),
+	optionProperty(
+		'Web Search',
+		'webSearch',
+		WEB_SEARCH_OPTIONS,
+		'default',
+		'Sets the Codex web_search mode for this run',
+	),
+	booleanProperty(
+		'Bypass Approvals and Sandbox',
+		'bypassApprovalsAndSandbox',
+		'Whether to pass --dangerously-bypass-approvals-and-sandbox. Use only in an externally sandboxed environment.',
+	),
+	booleanProperty(
+		'Bypass Hook Trust',
+		'bypassHookTrust',
+		'Whether to run enabled hooks without persisted hook trust for this invocation.',
+	),
+];
+
 export class Codex implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'Codex',
@@ -73,294 +428,79 @@ export class Codex implements INodeType {
 				name: 'operation',
 				type: 'options',
 				noDataExpression: true,
-				options: [
-					{
-						name: 'Run Prompt',
-						value: 'runPrompt',
-						description: 'Send a prompt to Codex and capture the response',
-						action: 'Run a prompt',
-					},
-				],
+				options: [...RUN_PROMPT_OPERATION],
 				default: 'runPrompt',
 			},
-			{
-				displayName: 'Prompt',
-				name: 'prompt',
-				type: 'string',
+			stringProperty('Prompt', 'prompt', 'Prompt sent to Codex as the instruction argument', {
+				required: true,
 				typeOptions: {
 					rows: 6,
 				},
-				required: true,
-				default: '',
-				description: 'Prompt sent to Codex as the instruction argument',
-			},
-			{
-				displayName: 'Output Format',
-				name: 'outputFormat',
-				type: 'options',
-				options: [
-					{
-						name: 'Text (final CLI Output)',
-						value: 'text',
-						description: 'Return the Codex CLI stdout as text',
+			}),
+			optionProperty(
+				'Output Format',
+				'outputFormat',
+				OUTPUT_FORMAT_OPTIONS,
+				'structured',
+			),
+			optionProperty(
+				'Model',
+				'model',
+				MODEL_OPTIONS,
+				'',
+				'Model the Codex CLI should use. Default uses the local Codex config.',
+			),
+			stringProperty(
+				'Custom Model ID',
+				'customModel',
+				'Exact model ID passed to Codex when Model is Custom',
+				{
+					placeholder: 'gpt-5.5-codex',
+					displayOptions: {
+						show: {
+							model: ['custom'],
+						},
 					},
-					{
-						name: 'Structured (parsed events)',
-						value: 'structured',
-						description: 'Run with --json and return a parsed summary',
-					},
-					{
-						name: 'Raw JSON Events',
-						value: 'json',
-						description: 'Run with --json and return every JSONL event as an array',
-					},
-				],
-				default: 'structured',
-			},
-			{
-				displayName: 'Model',
-				name: 'model',
-				type: 'string',
-				default: '',
-				placeholder: 'gpt-5.2, gpt-5.4, o3, ...',
-				description: 'Leave empty to use the Codex CLI default',
-			},
-			{
-				displayName: 'Working Directory',
-				name: 'workingDirectory',
-				type: 'string',
-				default: '',
-				placeholder: '/data/projects/my-repo',
-				description: 'Directory passed to Codex with --cd and used as the process cwd',
-			},
-			{
-				displayName: 'Resume Mode',
-				name: 'resumeMode',
-				type: 'options',
-				options: [
-					{ name: 'New Session', value: 'new' },
-					{ name: 'Resume Most Recent (--last)', value: 'last' },
-					{ name: 'Resume by Session ID', value: 'sessionId' },
-				],
-				default: 'new',
-			},
-			{
-				displayName: 'Session ID',
-				name: 'sessionId',
-				type: 'string',
-				default: '',
+				},
+			),
+			stringProperty(
+				'Working Directory',
+				'workingDirectory',
+				'Directory passed to Codex with --cd and used as the process cwd',
+				{
+					placeholder: '/data/projects/my-repo',
+				},
+			),
+			optionProperty('Resume Mode', 'resumeMode', RESUME_MODE_OPTIONS, 'new'),
+			stringProperty('Session ID', 'sessionId', undefined, {
 				placeholder: '550e8400-e29b-41d4-a716-446655440000',
 				displayOptions: {
 					show: {
 						resumeMode: ['sessionId'],
 					},
 				},
-			},
-			{
-				displayName: 'Sandbox Mode',
-				name: 'sandboxMode',
-				type: 'options',
-				options: [
-					{ name: 'Default', value: 'default' },
-					{ name: 'Read Only', value: 'read-only' },
-					{ name: 'Workspace Write', value: 'workspace-write' },
-					{ name: 'Danger Full Access', value: 'danger-full-access' },
-				],
-				default: 'default',
-				description: 'Codex sandbox policy for model-generated shell commands',
-			},
-			{
-				displayName: 'Approval Policy',
-				name: 'approvalPolicy',
-				type: 'options',
-				options: [
-					{ name: 'Default', value: 'default' },
-					{ name: 'Untrusted', value: 'untrusted' },
-					{ name: 'On Request', value: 'on-request' },
-					{ name: 'Never', value: 'never' },
-				],
-				default: 'default',
-				description: 'When Codex should ask for command approval',
-			},
-			{
-				displayName: 'Bypass Approvals and Sandbox',
-				name: 'bypassApprovalsAndSandbox',
-				type: 'boolean',
-				default: false,
-				description:
-					'Whether to pass --dangerously-bypass-approvals-and-sandbox. Use only in an externally sandboxed environment.',
-			},
+			}),
+			optionProperty(
+				'Sandbox Mode',
+				'sandboxMode',
+				SANDBOX_MODE_OPTIONS,
+				'default',
+				'Codex sandbox policy for model-generated shell commands',
+			),
+			optionProperty(
+				'Approval Policy',
+				'approvalPolicy',
+				APPROVAL_POLICY_OPTIONS,
+				'default',
+				'When Codex should ask for command approval',
+			),
 			{
 				displayName: 'Additional Options',
 				name: 'additionalOptions',
 				type: 'collection',
 				placeholder: 'Add Option',
 				default: {},
-				options: [
-					{
-						displayName: 'Add Directories',
-						name: 'addDirs',
-						type: 'string',
-						default: '',
-						placeholder: '/data/lib,/data/shared',
-						description: 'Newline- or comma-separated additional writable dirs (--add-dir)',
-					},
-					{
-						displayName: 'Additional CLI Args (Raw)',
-						name: 'additionalArgs',
-						type: 'string',
-						default: '',
-						description: 'Extra args appended before the prompt',
-					},
-					{
-						displayName: 'Codex Binary Path',
-						name: 'codexBinaryPath',
-						type: 'string',
-						default: 'codex',
-						description: 'Path to the codex executable',
-					},
-					{
-						displayName: 'Config Overrides',
-						name: 'configOverrides',
-						type: 'string',
-						default: '',
-						placeholder: 'model_reasoning_effort="high"',
-						description: 'One -c key=value override per line',
-					},
-					{
-						displayName: 'Disable Features',
-						name: 'disableFeatures',
-						type: 'string',
-						default: '',
-						description: 'Comma- or newline-separated feature names for --disable',
-					},
-					{
-						displayName: 'Enable Features',
-						name: 'enableFeatures',
-						type: 'string',
-						default: '',
-						description: 'Comma- or newline-separated feature names for --enable',
-					},
-					{
-						displayName: 'Environment Variables',
-						name: 'envVars',
-						type: 'fixedCollection',
-						placeholder: 'Add Variable',
-						typeOptions: {
-							multipleValues: true,
-						},
-						default: {},
-						options: [
-							{
-								name: 'env',
-								displayName: 'Variable',
-								values: [
-									{
-										displayName: 'Name',
-										name: 'name',
-										type: 'string',
-										default: '',
-									},
-									{
-										displayName: 'Value',
-										name: 'value',
-										type: 'string',
-										default: '',
-									},
-								],
-							},
-						],
-					},
-					{
-						displayName: 'Ephemeral',
-						name: 'ephemeral',
-						type: 'boolean',
-						default: false,
-						description: 'Whether to run without persisting session files',
-					},
-					{
-						displayName: 'Ignore Project Rules',
-						name: 'ignoreRules',
-						type: 'boolean',
-						default: false,
-						description: 'Whether to add --ignore-rules',
-					},
-					{
-						displayName: 'Ignore User Config',
-						name: 'ignoreUserConfig',
-						type: 'boolean',
-						default: false,
-						description: 'Whether to add --ignore-user-config',
-					},
-					{
-						displayName: 'Images',
-						name: 'images',
-						type: 'string',
-						default: '',
-						placeholder: '/data/image.png,/data/mockup.jpg',
-						description: 'Newline- or comma-separated image paths passed with --image',
-					},
-					{
-						displayName: 'Local Provider',
-						name: 'localProvider',
-						type: 'options',
-						options: [
-							{ name: 'Default', value: '' },
-							{ name: 'LM Studio', value: 'lmstudio' },
-							{ name: 'Ollama', value: 'ollama' },
-						],
-						default: '',
-					},
-					{
-						displayName: 'Output Last Message File',
-						name: 'outputLastMessageFile',
-						type: 'string',
-						default: '',
-						description: 'Path passed to --output-last-message',
-					},
-					{
-						displayName: 'Output Schema File',
-						name: 'outputSchemaFile',
-						type: 'string',
-						default: '',
-						description: 'JSON Schema file passed to --output-schema for new sessions',
-					},
-					{
-						displayName: 'Profile',
-						name: 'profile',
-						type: 'string',
-						default: '',
-						description: 'Configuration profile from config.toml',
-					},
-					{
-						displayName: 'Skip Git Repo Check',
-						name: 'skipGitRepoCheck',
-						type: 'boolean',
-						default: false,
-						description: 'Whether to allow running Codex outside a Git repository',
-					},
-					{
-						displayName: 'Timeout (Seconds)',
-						name: 'timeout',
-						type: 'number',
-						default: 600,
-						description: 'Kill the codex process after this many seconds',
-					},
-					{
-						displayName: 'Use OSS Provider',
-						name: 'oss',
-						type: 'boolean',
-						default: false,
-						description: 'Whether to add --oss',
-					},
-					{
-						displayName: 'Web Search',
-						name: 'webSearch',
-						type: 'boolean',
-						default: false,
-						description: 'Whether to enable live web search with --search',
-					},
-				],
+				options: ADDITIONAL_OPTION_PROPERTIES,
 			},
 		],
 	};
@@ -400,7 +540,8 @@ async function runCodex(
 ): Promise<IDataObject> {
 	const prompt = this.getNodeParameter('prompt', itemIndex) as string;
 	const outputFormat = this.getNodeParameter('outputFormat', itemIndex) as OutputFormat;
-	const model = this.getNodeParameter('model', itemIndex, '') as string;
+	const model = this.getNodeParameter('model', itemIndex, '') as ModelSelection;
+	const customModel = this.getNodeParameter('customModel', itemIndex, '') as string;
 	const workingDirectory = this.getNodeParameter(
 		'workingDirectory',
 		itemIndex,
@@ -416,10 +557,6 @@ async function runCodex(
 		'approvalPolicy',
 		itemIndex,
 	) as ApprovalPolicy;
-	const bypassApprovalsAndSandbox = this.getNodeParameter(
-		'bypassApprovalsAndSandbox',
-		itemIndex,
-	) as boolean;
 	const additionalOptions = this.getNodeParameter(
 		'additionalOptions',
 		itemIndex,
@@ -434,39 +571,39 @@ async function runCodex(
 		throw new Error('Session ID is required when Resume Mode is "sessionId"');
 	}
 
+	const preparedSchemaFile = await prepareOutputSchemaFile(additionalOptions);
 	const args = buildCodexArgs({
 		prompt,
 		outputFormat,
-		model,
+		model: resolveModel(model, customModel),
 		workingDirectory,
 		resumeMode,
 		sessionId,
 		sandboxMode,
 		approvalPolicy,
-		bypassApprovalsAndSandbox,
 		additionalOptions,
+		outputSchemaFile: preparedSchemaFile.path,
 	});
 
 	const codexBinaryPath =
 		((additionalOptions.codexBinaryPath as string) || '').trim() || 'codex';
 	const timeoutMs = (((additionalOptions.timeout as number) || 600) as number) * 1000;
 
-	const env: NodeJS.ProcessEnv = { ...process.env };
-	const envVarsCollection = additionalOptions.envVars as IDataObject | undefined;
-	if (envVarsCollection?.env && Array.isArray(envVarsCollection.env)) {
-		for (const v of envVarsCollection.env as EnvVarItem[]) {
-			if (v && v.name) env[v.name] = v.value ?? '';
-		}
-	}
-
+	const env = buildCodexEnvironment(additionalOptions);
 	const cwd = workingDirectory.trim() || undefined;
-	const { stdout, stderr } = await spawnCodex(
-		codexBinaryPath,
-		args,
-		cwd,
-		env,
-		timeoutMs,
-	);
+	let stdout: string;
+	let stderr: string;
+	try {
+		({ stdout, stderr } = await spawnCodex(
+			codexBinaryPath,
+			args,
+			cwd,
+			env,
+			timeoutMs,
+		));
+	} finally {
+		await preparedSchemaFile.cleanup();
+	}
 	const trimmedStderr = stderr.trim();
 
 	if (outputFormat === 'text') {
@@ -501,8 +638,8 @@ function buildCodexArgs(options: {
 	sessionId: string;
 	sandboxMode: SandboxMode;
 	approvalPolicy: ApprovalPolicy;
-	bypassApprovalsAndSandbox: boolean;
 	additionalOptions: IDataObject;
+	outputSchemaFile: string | undefined;
 }): string[] {
 	const {
 		prompt,
@@ -513,68 +650,261 @@ function buildCodexArgs(options: {
 		sessionId,
 		sandboxMode,
 		approvalPolicy,
-		bypassApprovalsAndSandbox,
 		additionalOptions,
+		outputSchemaFile,
 	} = options;
-	const globalArgs: string[] = [];
-	const execArgs: string[] = [];
+	const args: string[] = ['exec'];
 
-	appendRepeated(globalArgs, '-c', splitLines(additionalOptions.configOverrides as string));
-	appendRepeated(globalArgs, '--enable', splitList(additionalOptions.enableFeatures as string));
-	appendRepeated(globalArgs, '--disable', splitList(additionalOptions.disableFeatures as string));
+	if (resumeMode !== 'new') args.push('resume');
 
-	const profile = ((additionalOptions.profile as string) || '').trim();
-	if (profile) globalArgs.push('--profile', profile);
+	appendCommonExecArgs(args, {
+		outputFormat,
+		model,
+		approvalPolicy,
+		additionalOptions,
+		outputSchemaFile,
+	});
 
-	if (model.trim()) globalArgs.push('--model', model.trim());
-	if (additionalOptions.oss) globalArgs.push('--oss');
-
-	const localProvider = ((additionalOptions.localProvider as string) || '').trim();
-	if (localProvider) globalArgs.push('--local-provider', localProvider);
-
-	if (sandboxMode !== 'default') globalArgs.push('--sandbox', sandboxMode);
-	if (approvalPolicy !== 'default') globalArgs.push('--ask-for-approval', approvalPolicy);
-	if (bypassApprovalsAndSandbox) {
-		globalArgs.push('--dangerously-bypass-approvals-and-sandbox');
+	if (resumeMode === 'new') {
+		appendNewExecArgs(args, {
+			workingDirectory,
+			sandboxMode,
+			additionalOptions,
+		});
+		return [...args, prompt];
 	}
-
-	if (workingDirectory.trim()) globalArgs.push('--cd', workingDirectory.trim());
-
-	appendRepeated(globalArgs, '--add-dir', splitList(additionalOptions.addDirs as string));
-	appendRepeated(globalArgs, '--image', splitList(additionalOptions.images as string));
-
-	if (additionalOptions.webSearch) globalArgs.push('--search');
-
-	if (outputFormat !== 'text') execArgs.push('--json');
-	if (resumeMode === 'new') execArgs.push('--color', 'never');
-
-	if (additionalOptions.skipGitRepoCheck) execArgs.push('--skip-git-repo-check');
-	if (additionalOptions.ephemeral) execArgs.push('--ephemeral');
-	if (additionalOptions.ignoreUserConfig) execArgs.push('--ignore-user-config');
-	if (additionalOptions.ignoreRules) execArgs.push('--ignore-rules');
-
-	const outputLastMessageFile = (
-		(additionalOptions.outputLastMessageFile as string) || ''
-	).trim();
-	if (outputLastMessageFile) execArgs.push('--output-last-message', outputLastMessageFile);
-
-	const outputSchemaFile = ((additionalOptions.outputSchemaFile as string) || '').trim();
-	if (resumeMode === 'new' && outputSchemaFile) {
-		execArgs.push('--output-schema', outputSchemaFile);
-	}
-
-	const additionalArgs = ((additionalOptions.additionalArgs as string) || '').trim();
-	if (additionalArgs) execArgs.push(...parseRawArgs(additionalArgs));
 
 	if (resumeMode === 'last') {
-		return [...globalArgs, 'exec', 'resume', ...execArgs, '--last', prompt];
+		return [...args, '--last', prompt];
 	}
 
-	if (resumeMode === 'sessionId') {
-		return [...globalArgs, 'exec', 'resume', ...execArgs, sessionId.trim(), prompt];
+	return [...args, sessionId.trim(), prompt];
+}
+
+function appendCommonExecArgs(
+	args: string[],
+	options: {
+		outputFormat: OutputFormat;
+		model: string;
+		approvalPolicy: ApprovalPolicy;
+		additionalOptions: IDataObject;
+		outputSchemaFile: string | undefined;
+	},
+): void {
+	const { outputFormat, model, approvalPolicy, additionalOptions, outputSchemaFile } =
+		options;
+
+	appendConfigArgs(args, approvalPolicy, additionalOptions);
+	appendRepeated(
+		args,
+		'--enable',
+		collectionStrings(additionalOptions.enableFeatures, 'feature', 'name'),
+	);
+	appendRepeated(
+		args,
+		'--disable',
+		collectionStrings(additionalOptions.disableFeatures, 'feature', 'name'),
+	);
+
+	if (additionalOptions.strictConfig === true) args.push('--strict-config');
+	appendRepeated(
+		args,
+		'--image',
+		collectionStrings(additionalOptions.images, 'image', 'path'),
+	);
+
+	if (model) args.push('--model', model);
+
+	if (additionalOptions.bypassApprovalsAndSandbox === true) {
+		args.push('--dangerously-bypass-approvals-and-sandbox');
+	}
+	if (additionalOptions.bypassHookTrust === true) {
+		args.push('--dangerously-bypass-hook-trust');
+	}
+	if (additionalOptions.skipGitRepoCheck === true) args.push('--skip-git-repo-check');
+	if (additionalOptions.ephemeral === true) args.push('--ephemeral');
+	if (additionalOptions.ignoreUserConfig === true) args.push('--ignore-user-config');
+	if (additionalOptions.ignoreRules === true) args.push('--ignore-rules');
+	if (outputSchemaFile) args.push('--output-schema', outputSchemaFile);
+	if (outputFormat !== 'text') args.push('--json');
+
+	const outputLastMessageFile = stringOption(additionalOptions.outputLastMessageFile);
+	if (outputLastMessageFile) {
+		args.push('--output-last-message', outputLastMessageFile);
+	}
+}
+
+function appendNewExecArgs(
+	args: string[],
+	options: {
+		workingDirectory: string;
+		sandboxMode: SandboxMode;
+		additionalOptions: IDataObject;
+	},
+): void {
+	const { workingDirectory, sandboxMode, additionalOptions } = options;
+	const bypassApprovalsAndSandbox = additionalOptions.bypassApprovalsAndSandbox === true;
+	if (bypassApprovalsAndSandbox && sandboxMode !== 'default') {
+		throw new Error(
+			'Bypass Approvals and Sandbox cannot be combined with Sandbox Mode. Choose one execution mode.',
+		);
 	}
 
-	return [...globalArgs, 'exec', ...execArgs, prompt];
+	const profile = stringOption(additionalOptions.profile);
+	if (profile) args.push('--profile', profile);
+
+	const profileV2 = stringOption(additionalOptions.profileV2);
+	if (profileV2) args.push('--profile-v2', profileV2);
+
+	if (additionalOptions.oss === true) args.push('--oss');
+
+	const localProvider = stringOption(additionalOptions.localProvider);
+	if (localProvider) args.push('--local-provider', localProvider);
+
+	if (sandboxMode !== 'default') args.push('--sandbox', sandboxMode);
+	if (workingDirectory.trim()) args.push('--cd', workingDirectory.trim());
+
+	appendRepeated(
+		args,
+		'--add-dir',
+		collectionStrings(additionalOptions.addDirs, 'directory', 'path'),
+	);
+
+	args.push('--color', 'never');
+}
+
+function appendConfigArgs(
+	args: string[],
+	approvalPolicy: ApprovalPolicy,
+	additionalOptions: IDataObject,
+): void {
+	const bypassApprovalsAndSandbox = additionalOptions.bypassApprovalsAndSandbox === true;
+	if (bypassApprovalsAndSandbox && approvalPolicy !== 'default') {
+		throw new Error(
+			'Bypass Approvals and Sandbox cannot be combined with Approval Policy. Choose one execution mode.',
+		);
+	}
+
+	for (const override of configOverrideValues(additionalOptions.configOverrides)) {
+		args.push('-c', override);
+	}
+
+	if (!bypassApprovalsAndSandbox && approvalPolicy !== 'default') {
+		args.push('-c', `approval_policy="${approvalPolicy}"`);
+	}
+
+	const reasoningEffort = enumOption<ReasoningEffort>(
+		additionalOptions.reasoningEffort,
+		'default',
+	);
+	if (reasoningEffort !== 'default') {
+		args.push('-c', `model_reasoning_effort="${reasoningEffort}"`);
+	}
+
+	const reasoningSummary = enumOption<ReasoningSummary>(
+		additionalOptions.reasoningSummary,
+		'default',
+	);
+	if (reasoningSummary !== 'default') {
+		args.push('-c', `model_reasoning_summary="${reasoningSummary}"`);
+	}
+
+	const verbosity = enumOption<ModelVerbosity>(additionalOptions.verbosity, 'default');
+	if (verbosity !== 'default') {
+		args.push('-c', `model_verbosity="${verbosity}"`);
+	}
+
+	const webSearch = enumOption<WebSearchMode>(additionalOptions.webSearch, 'default');
+	if (webSearch !== 'default') {
+		args.push('-c', `web_search="${webSearch}"`);
+	}
+
+	if (additionalOptions.networkAccess === true) {
+		args.push('-c', 'sandbox_workspace_write.network_access=true');
+	}
+}
+
+function resolveModel(model: ModelSelection, customModel: string): string {
+	if (model === 'custom') {
+		const trimmedCustomModel = customModel.trim();
+		if (!trimmedCustomModel) {
+			throw new Error('Custom Model ID is required when Model is Custom');
+		}
+		return trimmedCustomModel;
+	}
+	return model;
+}
+
+async function prepareOutputSchemaFile(
+	additionalOptions: IDataObject,
+): Promise<PreparedSchemaFile> {
+	const outputSchemaFile = stringOption(additionalOptions.outputSchemaFile);
+	const outputSchemaJson = stringOption(additionalOptions.outputSchemaJson);
+
+	if (outputSchemaFile && outputSchemaJson) {
+		throw new Error('Use either Output Schema JSON or Output Schema File, not both');
+	}
+
+	if (outputSchemaFile) {
+		return {
+			path: outputSchemaFile,
+			cleanup: async () => {},
+		};
+	}
+
+	if (!outputSchemaJson) {
+		return {
+			path: undefined,
+			cleanup: async () => {},
+		};
+	}
+
+	JSON.parse(outputSchemaJson);
+	const tempDir = await fs.mkdtemp(join(tmpdir(), 'n8n-codex-schema-'));
+	const schemaPath = join(tempDir, 'schema.json');
+	await fs.writeFile(schemaPath, outputSchemaJson, 'utf8');
+	return {
+		path: schemaPath,
+		cleanup: async () => {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		},
+	};
+}
+
+function buildCodexEnvironment(additionalOptions: IDataObject): NodeJS.ProcessEnv {
+	const env: NodeJS.ProcessEnv = { ...process.env };
+	if (!env.HOME && env.USER) {
+		env.HOME = `/Users/${env.USER}`;
+	}
+	if (env.HOME && !env.CODEX_HOME) {
+		env.CODEX_HOME = join(env.HOME, '.codex');
+	}
+	env.PATH = mergePathEntries(env.PATH, [
+		'/opt/homebrew/bin',
+		'/usr/local/bin',
+		'/usr/bin',
+		'/bin',
+		'/usr/sbin',
+		'/sbin',
+	]);
+
+	const envVarsCollection = asRecord(additionalOptions.envVars);
+	const envVars = envVarsCollection?.env;
+	if (Array.isArray(envVars)) {
+		for (const v of envVars as EnvVarItem[]) {
+			if (v && v.name) env[v.name] = v.value ?? '';
+		}
+	}
+	return env;
+}
+
+function mergePathEntries(currentPath: string | undefined, requiredEntries: string[]): string {
+	const existingEntries = currentPath ? currentPath.split(':').filter(Boolean) : [];
+	const mergedEntries = [...requiredEntries];
+	for (const entry of existingEntries) {
+		if (!mergedEntries.includes(entry)) mergedEntries.push(entry);
+	}
+	return mergedEntries.join(':');
 }
 
 function spawnCodex(
@@ -615,12 +945,19 @@ function spawnCodex(
 			reject(new Error(`Failed to spawn ${binary}: ${err.message}`));
 		});
 
-		child.on('close', (code) => {
+		child.on('close', (code, signal) => {
 			clearTimeout(timer);
 			if (timedOut) {
 				return reject(
 					new Error(
 						`codex timed out after ${timeoutMs / 1000}s\nstderr: ${stderr}`,
+					),
+				);
+			}
+			if (signal) {
+				return reject(
+					new Error(
+						`codex exited from signal ${signal}\nstderr: ${stderr}\nstdout (head): ${stdout.slice(0, 4000)}`,
 					),
 				);
 			}
@@ -898,6 +1235,8 @@ function eventSources(event: JsonEvent): Record<string, unknown>[] {
 	const sources: Record<string, unknown>[] = [event];
 	const payload = asRecord(event.payload);
 	if (payload) sources.push(payload);
+	const item = asRecord(event.item);
+	if (item) sources.push(item);
 	return sources;
 }
 
@@ -905,23 +1244,47 @@ function typeForSource(source: Record<string, unknown>, event: JsonEvent): strin
 	return stringValue(source.type) ?? (source === event ? undefined : stringValue(event.type)) ?? '';
 }
 
-function splitList(value: string | undefined): string[] {
-	return ((value || '').match(/(?:[^\s,]+|"[^"]*"|'[^']*')+/g) || [])
-		.map((token) => token.replace(/^["']|["']$/g, '').trim())
-		.filter(Boolean);
+function stringOption(value: unknown): string {
+	return typeof value === 'string' ? value.trim() : '';
 }
 
-function splitLines(value: string | undefined): string[] {
-	return (value || '')
-		.split(/\r?\n/)
-		.map((line) => line.trim())
-		.filter(Boolean);
+function enumOption<T extends string>(value: unknown, defaultValue: T): T {
+	return typeof value === 'string' && value.length > 0 ? (value as T) : defaultValue;
 }
 
-function parseRawArgs(value: string): string[] {
-	return (value.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || []).map((token) =>
-		token.replace(/^["']|["']$/g, ''),
-	);
+function collectionItems(value: unknown, collectionName: string): IDataObject[] {
+	const collection = asRecord(value);
+	if (!collection) return [];
+	const items = collection[collectionName];
+	if (!Array.isArray(items)) return [];
+	return items as IDataObject[];
+}
+
+function collectionStrings(
+	value: unknown,
+	collectionName: string,
+	propertyName: string,
+): string[] {
+	const values: string[] = [];
+	for (const item of collectionItems(value, collectionName)) {
+		const fieldValue = stringOption(item[propertyName]);
+		if (fieldValue) values.push(fieldValue);
+	}
+	return values;
+}
+
+function configOverrideValues(value: unknown): string[] {
+	const values: string[] = [];
+	for (const item of collectionItems(value, 'override')) {
+		const key = stringOption(item.key);
+		const overrideValue = stringOption(item.value);
+		if (!key && !overrideValue) continue;
+		if (!key || !overrideValue) {
+			throw new Error('Config Override rows require both Key and Value');
+		}
+		values.push(`${key}=${overrideValue}`);
+	}
+	return values;
 }
 
 function appendRepeated(args: string[], flag: string, values: string[]): void {
