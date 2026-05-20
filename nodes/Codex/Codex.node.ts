@@ -10,7 +10,7 @@ import {
 } from 'n8n-workflow';
 import { spawn } from 'child_process';
 import { promises as fs } from 'fs';
-import { tmpdir } from 'os';
+import { homedir, tmpdir } from 'os';
 import { join } from 'path';
 
 const RUN_PROMPT_OPERATION = [
@@ -592,9 +592,8 @@ async function runCodex(
 	const env = buildCodexEnvironment(additionalOptions);
 	const cwd = workingDirectory.trim() || undefined;
 	let stdout: string;
-	let stderr: string;
 	try {
-		({ stdout, stderr } = await spawnCodex(
+		({ stdout } = await spawnCodex(
 			codexBinaryPath,
 			args,
 			cwd,
@@ -604,12 +603,10 @@ async function runCodex(
 	} finally {
 		await preparedSchemaFile.cleanup();
 	}
-	const trimmedStderr = stderr.trim();
 
 	if (outputFormat === 'text') {
 		return {
 			text: stdout.replace(/\s+$/, ''),
-			...(trimmedStderr ? { stderr: trimmedStderr } : {}),
 		};
 	}
 
@@ -618,15 +615,11 @@ async function runCodex(
 	if (outputFormat === 'json') {
 		return {
 			events: events as unknown as IDataObject[],
-			...(trimmedStderr ? { stderr: trimmedStderr } : {}),
 		};
 	}
 
 	const summary = summarizeEvents(events);
-	return {
-		...(summary as unknown as IDataObject),
-		...(trimmedStderr ? { stderr: trimmedStderr } : {}),
-	};
+	return summary as unknown as IDataObject;
 }
 
 function buildCodexArgs(options: {
@@ -873,9 +866,7 @@ async function prepareOutputSchemaFile(
 
 function buildCodexEnvironment(additionalOptions: IDataObject): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = { ...process.env };
-	if (!env.HOME && env.USER) {
-		env.HOME = `/Users/${env.USER}`;
-	}
+	env.HOME = env.HOME ?? homedir();
 	if (env.HOME && !env.CODEX_HOME) {
 		env.CODEX_HOME = join(env.HOME, '.codex');
 	}
@@ -913,7 +904,7 @@ function spawnCodex(
 	cwd: string | undefined,
 	env: NodeJS.ProcessEnv,
 	timeoutMs: number,
-): Promise<{ stdout: string; stderr: string }> {
+): Promise<{ stdout: string }> {
 	return new Promise((resolve, reject) => {
 		const child = spawn(binary, args, {
 			cwd,
@@ -922,7 +913,6 @@ function spawnCodex(
 		});
 
 		let stdout = '';
-		let stderr = '';
 		let timedOut = false;
 
 		const timer = setTimeout(() => {
@@ -936,39 +926,27 @@ function spawnCodex(
 		child.stdout?.on('data', (chunk: Buffer) => {
 			stdout += chunk.toString('utf8');
 		});
-		child.stderr?.on('data', (chunk: Buffer) => {
-			stderr += chunk.toString('utf8');
-		});
+		child.stderr?.on('data', () => {});
 
 		child.on('error', (err) => {
 			clearTimeout(timer);
-			reject(new Error(`Failed to spawn ${binary}: ${err.message}`));
+			reject(new Error(`Failed to spawn Codex process: ${err.name}`));
 		});
 
 		child.on('close', (code, signal) => {
 			clearTimeout(timer);
 			if (timedOut) {
 				return reject(
-					new Error(
-						`codex timed out after ${timeoutMs / 1000}s\nstderr: ${stderr}`,
-					),
+					new Error(`codex timed out after ${timeoutMs / 1000}s`),
 				);
 			}
 			if (signal) {
-				return reject(
-					new Error(
-						`codex exited from signal ${signal}\nstderr: ${stderr}\nstdout (head): ${stdout.slice(0, 4000)}`,
-					),
-				);
+				return reject(new Error(`codex exited from signal ${signal}`));
 			}
 			if (code !== 0) {
-				return reject(
-					new Error(
-						`codex exited with code ${code}\nstderr: ${stderr}\nstdout (head): ${stdout.slice(0, 4000)}`,
-					),
-				);
+				return reject(new Error(`codex exited with code ${code}`));
 			}
-			resolve({ stdout, stderr });
+			resolve({ stdout });
 		});
 	});
 }
