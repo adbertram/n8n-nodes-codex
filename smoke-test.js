@@ -60,7 +60,6 @@ async function runCase(label, params) {
 		sessionId: '',
 		sandboxMode: 'workspace-write',
 		approvalPolicy: 'never',
-		bypassApprovalsAndSandbox: false,
 		additionalOptions: {
 			timeout: 120,
 			codexBinaryPath: 'codex',
