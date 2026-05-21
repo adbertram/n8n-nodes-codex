@@ -396,11 +396,6 @@ const ADDITIONAL_OPTION_PROPERTIES: INodeProperties[] = [
 		'Sets the Codex web_search mode for this run',
 	),
 	booleanProperty(
-		'Bypass Approvals and Sandbox',
-		'bypassApprovalsAndSandbox',
-		'Whether to pass --dangerously-bypass-approvals-and-sandbox. Use only in an externally sandboxed environment.',
-	),
-	booleanProperty(
 		'Bypass Hook Trust',
 		'bypassHookTrust',
 		'Whether to run enabled hooks without persisted hook trust for this invocation.',
@@ -708,9 +703,6 @@ function appendCommonExecArgs(
 
 	if (model) args.push('--model', model);
 
-	if (additionalOptions.bypassApprovalsAndSandbox === true) {
-		args.push('--dangerously-bypass-approvals-and-sandbox');
-	}
 	if (additionalOptions.bypassHookTrust === true) {
 		args.push('--dangerously-bypass-hook-trust');
 	}
@@ -736,12 +728,6 @@ function appendNewExecArgs(
 	},
 ): void {
 	const { workingDirectory, sandboxMode, additionalOptions } = options;
-	const bypassApprovalsAndSandbox = additionalOptions.bypassApprovalsAndSandbox === true;
-	if (bypassApprovalsAndSandbox && sandboxMode !== 'default') {
-		throw new Error(
-			'Bypass Approvals and Sandbox cannot be combined with Sandbox Mode. Choose one execution mode.',
-		);
-	}
 
 	const profile = stringOption(additionalOptions.profile);
 	if (profile) args.push('--profile', profile);
@@ -771,18 +757,11 @@ function appendConfigArgs(
 	approvalPolicy: ApprovalPolicy,
 	additionalOptions: IDataObject,
 ): void {
-	const bypassApprovalsAndSandbox = additionalOptions.bypassApprovalsAndSandbox === true;
-	if (bypassApprovalsAndSandbox && approvalPolicy !== 'default') {
-		throw new Error(
-			'Bypass Approvals and Sandbox cannot be combined with Approval Policy. Choose one execution mode.',
-		);
-	}
-
 	for (const override of configOverrideValues(additionalOptions.configOverrides)) {
 		args.push('-c', override);
 	}
 
-	if (!bypassApprovalsAndSandbox && approvalPolicy !== 'default') {
+	if (approvalPolicy !== 'default') {
 		args.push('-c', `approval_policy="${approvalPolicy}"`);
 	}
 

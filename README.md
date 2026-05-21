@@ -32,13 +32,13 @@ codex exec --help
 Install the package from n8n's Community Nodes settings:
 
 ```text
-n8n-nodes-codex
+@oden-kun/n8n-nodes-codex
 ```
 
 For manual self-hosted installs, install it into the n8n environment:
 
 ```sh
-npm install n8n-nodes-codex
+npm install @oden-kun/n8n-nodes-codex
 ```
 
 Restart n8n if your deployment does not reload community nodes automatically.

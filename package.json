@@ -1,6 +1,6 @@
 {
-  "name": "n8n-nodes-codex",
-  "version": "0.1.5",
+  "name": "@oden-kun/n8n-nodes-codex",
+  "version": "0.1.8",
   "description": "Unofficial n8n community node for running prompts with the Codex CLI.",
   "keywords": [
     "n8n-community-node-package",
