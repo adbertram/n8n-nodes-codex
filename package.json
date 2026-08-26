@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-codex",
-  "version": "0.1.8",
+  "version": "0.1.13",
   "description": "Unofficial n8n community node for running prompts with the Codex CLI.",
   "keywords": [
     "n8n-community-node-package",
@@ -22,6 +22,7 @@
     "format": "prettier nodes --write",
     "lint": "eslint \"nodes/**/*.ts\"",
     "lintfix": "eslint \"nodes/**/*.ts\" --fix",
+    "test": "npm run build && node tests/codex-output-streams.test.js",
     "smoke": "node smoke-test.js"
   },
   "files": [
