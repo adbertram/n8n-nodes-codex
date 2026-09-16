@@ -6,12 +6,25 @@ This is an unofficial n8n community node that wraps `codex exec`. It does not us
 
 This project is not affiliated with, endorsed by, or sponsored by OpenAI. OpenAI and Codex are trademarks of OpenAI.
 
+## Credentials
+
+The node uses a **Codex CLI** credential:
+
+- **Codex Binary Path**: command or absolute path for the `codex` binary (default `codex`)
+- **Run As User**: optional OS user to run Codex as through `sudo -u`
+- **Authentication**: `ChatGPT Sign-In` uses the browser sign-in already stored in the Codex home directory; `API Key` runs `codex login --with-api-key` before each run
+- **API Key**: OpenAI API key, required for API-key authentication
+- **Codex Home**: directory passed as `CODEX_HOME`. Empty means `~/.codex` for ChatGPT sign-in, or a fresh temporary directory for API-key sign-in.
+
+Note: `codex exec` ignores `OPENAI_API_KEY` in the environment. Auth is read from `$CODEX_HOME/auth.json`, which is why API-key runs sign in first.
+
 ## Features
 
 - Run prompts through `codex exec` from an n8n workflow.
 - Return plain text, raw JSONL events, or a parsed structured summary.
 - Configure model, working directory, session resume mode, sandbox mode, and approval policy.
-- Pass Codex CLI options such as config overrides, images, additional writable directories, and web search.
+- Configure common Codex `-c` overrides through graphical fields with descriptions.
+- Pass advanced Codex CLI options such as raw config overrides, feature flags, images, additional writable directories, and web search.
 - Capture stderr and process failures as n8n node errors.
 
 ## Requirements
@@ -32,13 +45,13 @@ codex exec --help
 Install the package from n8n's Community Nodes settings:
 
 ```text
-@oden-kun/n8n-nodes-codex
+n8n-nodes-codex
 ```
 
 For manual self-hosted installs, install it into the n8n environment:
 
 ```sh
-npm install @oden-kun/n8n-nodes-codex
+npm install n8n-nodes-codex
 ```
 
 Restart n8n if your deployment does not reload community nodes automatically.
@@ -57,6 +70,21 @@ Common settings:
 - `Approval Policy`: forwarded to Codex CLI.
 
 For most workflows, start with `Structured` output. It gives downstream nodes stable fields without forcing them to parse Codex JSONL events directly.
+
+## Codex Config Overrides
+
+The node exposes Codex config keys as graphical fields under `Additional Options`.
+Use these fields before reaching for `Raw Config Overrides`; the raw field remains available for newer Codex keys that are not listed yet.
+
+Common controls:
+
+- `Feature Flags`: set `features.<name>` to enabled or disabled.
+- `MCP Server Enablement`: set `mcp_servers.<id>.enabled` when you know the server ID.
+- `Plugin MCP Server Enablement`: set `plugins.<plugin>.mcp_servers.<server>.enabled` for plugin-provided MCP servers.
+- `Documented Advanced Config Overrides`: select a documented complex config family and enter the resolved key plus TOML value.
+- `Ignore User Config`: pass `--ignore-user-config`, which prevents user-level Codex config, including user-defined MCP servers, from loading. This requires `Skip Git Repo Check` because Codex cannot load directory trust while user config is ignored.
+
+To disable plugin-provided MCP servers without listing every server ID, add `Feature Flags` -> `Plugins` -> `Disabled`. If the workflow must ignore all user-defined MCP configuration too, enable both `Ignore User Config` and `Skip Git Repo Check`.
 
 ## Output Formats
 
