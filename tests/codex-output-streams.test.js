@@ -215,18 +215,97 @@ wait
 		{ code: 'ESRCH' },
 	);
 
+	// Environment JSON must be an object whose values are strings.
+	const notObjectParams = baseParams(envPrinter.file);
+	notObjectParams.additionalOptions.environment = '[1]';
+	assert.match((await execute(notObjectParams, true)).error, /must be a JSON object/);
+	const nonStringParams = baseParams(envPrinter.file);
+	nonStringParams.additionalOptions.environment = '{"HOME":1}';
+	assert.match((await execute(nonStringParams, true)).error, /Environment variable HOME must be a string/);
+
+	// The node stays running until a descendant holding its output exits within the grace.
+	const lateWriter = makeScript(`#!/bin/sh
+(sleep 2; echo late) &
+echo early
+`);
+	const lateStarted = Date.now();
+	const lateOutput = await execute(baseParams(lateWriter.file));
+	assert.match(lateOutput.text, /early/);
+	assert.match(lateOutput.text, /late/);
+	assert.ok(Date.now() - lateStarted >= 1900, `returned after ${Date.now() - lateStarted}ms`);
+
 	// A descendant that started its own session escapes the group kill and holds
-	// stdout; the node must still return shortly after its timeout.
+	// stdout. The helper records its pid so the test proves it ran and was still
+	// holding the pipe when the node returned; the interpreter path is absolute and
+	// checked so a missing python cannot let the helper silently never start.
+	const python = '/usr/bin/python3';
+	assert.ok(fs.existsSync(python), `${python} is required`);
+	const escapedHelper = (pidFile) =>
+		`${python} -c "import os,time; os.setsid(); open('${pidFile}','w').write(str(os.getpid())); time.sleep(30)" &`;
+	const assertEscapedAndKill = (pidFile) => {
+		assert.ok(fs.existsSync(pidFile), 'the setsid helper started');
+		const pid = Number(fs.readFileSync(pidFile, 'utf8').trim());
+		process.kill(pid, 0);
+		process.kill(pid, 'SIGKILL');
+	};
+	const successOutputFor = (text) => ({
+		text,
+		stdout: `${text}\n`,
+		stderr: '',
+		exitCode: 0,
+		signal: null,
+		timedOut: false,
+		processError: null,
+	});
+
+	// After a timeout the node must still return shortly.
+	const escapeMarker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'codex-escaped-')), 'pid');
 	const escaper = makeScript(`#!/bin/sh
-python3 -c "import os,time; os.setsid(); time.sleep(30)" &
+${escapedHelper(escapeMarker)}
 sleep 300
 `);
 	const escapeParams = baseParams(escaper.file);
 	escapeParams.additionalOptions.timeout = 1;
 	const escapeStarted = Date.now();
 	const escapeOutput = await execute(escapeParams);
+	const escapeElapsed = Date.now() - escapeStarted;
 	assert.strictEqual(escapeOutput.timedOut, true);
-	assert.ok(Date.now() - escapeStarted < 10000, `returned after ${Date.now() - escapeStarted}ms`);
+	assert.ok(escapeElapsed < 10000, `returned after ${escapeElapsed}ms`);
+	assertEscapedAndKill(escapeMarker);
+
+	// After a normal exit the node returns Codex's output once the grace ends and
+	// kills a descendant still holding it.
+	const holderMarker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'codex-holder-')), 'pid');
+	const holder = makeScript(`#!/bin/sh
+(sleep 30; echo late) &
+echo $! > "${holderMarker}"
+echo early
+exit 0
+`);
+	const holderStarted = Date.now();
+	const holderOutput = await execute(baseParams(holder.file));
+	const holderElapsed = Date.now() - holderStarted;
+	assert.deepStrictEqual(holderOutput, successOutputFor('early'));
+	assert.ok(holderElapsed >= 4500 && holderElapsed < 10000, `returned after ${holderElapsed}ms`);
+	assert.throws(
+		() => process.kill(Number(fs.readFileSync(holderMarker, 'utf8').trim()), 0),
+		{ code: 'ESRCH' },
+	);
+
+	// After a normal exit the node returns Codex's output even when a descendant
+	// started its own session and holds it.
+	const exitEscapeMarker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'codex-escaped-')), 'pid');
+	const exitEscaper = makeScript(`#!/bin/sh
+${escapedHelper(exitEscapeMarker)}
+echo early
+exit 0
+`);
+	const exitEscapeStarted = Date.now();
+	const exitEscapeOutput = await execute(baseParams(exitEscaper.file));
+	const exitEscapeElapsed = Date.now() - exitEscapeStarted;
+	assert.deepStrictEqual(exitEscapeOutput, successOutputFor('early'));
+	assert.ok(exitEscapeElapsed < 10000, `returned after ${exitEscapeElapsed}ms`);
+	assertEscapedAndKill(exitEscapeMarker);
 
 	// issue-manager's dispatch workflow sets these parameters by name
 	// (issue-manager/workflows/nodes.mjs harnessNode). n8n ignores a parameter the
