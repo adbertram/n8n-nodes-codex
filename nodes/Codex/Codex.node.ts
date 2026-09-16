@@ -4311,7 +4311,15 @@ function spawnCodex(
 		});
 
 		child.on('exit', () => {
-			closeGrace = setTimeout(killGroup, CLOSE_GRACE_MS);
+			// A descendant can keep the output pipes open after Codex exits, even one
+			// that left the process group by starting its own session. After the grace
+			// the group is killed and the pipes are released, so the node returns
+			// whatever an escaped descendant does.
+			closeGrace = setTimeout(() => {
+				killGroup();
+				child.stdout?.destroy();
+				child.stderr?.destroy();
+			}, CLOSE_GRACE_MS);
 		});
 
 		child.on('error', (err) => {

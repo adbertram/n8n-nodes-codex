@@ -214,4 +214,31 @@ wait
 		() => process.kill(Number(fs.readFileSync(marker, 'utf8').trim()), 0),
 		{ code: 'ESRCH' },
 	);
+
+	// A descendant that started its own session escapes the group kill and holds
+	// stdout; the node must still return shortly after its timeout.
+	const escaper = makeScript(`#!/bin/sh
+python3 -c "import os,time; os.setsid(); time.sleep(30)" &
+sleep 300
+`);
+	const escapeParams = baseParams(escaper.file);
+	escapeParams.additionalOptions.timeout = 1;
+	const escapeStarted = Date.now();
+	const escapeOutput = await execute(escapeParams);
+	assert.strictEqual(escapeOutput.timedOut, true);
+	assert.ok(Date.now() - escapeStarted < 10000, `returned after ${Date.now() - escapeStarted}ms`);
+
+	// issue-manager's dispatch workflow sets these parameters by name
+	// (issue-manager/workflows/nodes.mjs harnessNode). n8n ignores a parameter the
+	// node no longer declares, so a rename here would silently run Codex
+	// unconfined and with the default timeout.
+	const { properties } = new Codex().description;
+	const names = properties.map((entry) => entry.name);
+	for (const name of ['operation', 'prompt', 'outputFormat', 'model', 'customModel', 'workingDirectory', 'resumeMode', 'sandboxMode', 'approvalPolicy', 'additionalOptions']) {
+		assert.ok(names.includes(name), name);
+	}
+	const additional = new Set(properties.filter((entry) => entry.name === 'additionalOptions').flatMap((entry) => entry.options.map((option) => option.name)));
+	for (const name of ['sandboxProfile', 'environment', 'timeout', 'skipGitRepoCheck']) {
+		assert.ok(additional.has(name), name);
+	}
 })();
