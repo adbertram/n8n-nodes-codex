@@ -6,6 +6,18 @@ This is an unofficial n8n community node that wraps `codex exec`. It does not us
 
 This project is not affiliated with, endorsed by, or sponsored by OpenAI. OpenAI and Codex are trademarks of OpenAI.
 
+## Credentials
+
+The node uses a **Codex CLI** credential:
+
+- **Codex Binary Path**: command or absolute path for the `codex` binary (default `codex`)
+- **Run As User**: optional OS user to run Codex as through `sudo -u`
+- **Authentication**: `ChatGPT Sign-In` uses the browser sign-in already stored in the Codex home directory; `API Key` runs `codex login --with-api-key` before each run
+- **API Key**: OpenAI API key, required for API-key authentication
+- **Codex Home**: directory passed as `CODEX_HOME`. Empty means `~/.codex` for ChatGPT sign-in, or a fresh temporary directory for API-key sign-in.
+
+Note: `codex exec` ignores `OPENAI_API_KEY` in the environment. Auth is read from `$CODEX_HOME/auth.json`, which is why API-key runs sign in first.
+
 ## Features
 
 - Run prompts through `codex exec` from an n8n workflow.

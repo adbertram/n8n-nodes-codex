@@ -1423,14 +1423,6 @@ const ADDITIONAL_OPTION_PROPERTIES: INodeProperties[] = [
 		description:
 			'Additional writable directories passed with repeated --add-dir flags',
 	}),
-	stringProperty(
-		'Codex Binary Path',
-		'codexBinaryPath',
-		'Path to the codex executable',
-		{
-			default: 'codex',
-		},
-	),
 	...BOOLEAN_CONFIG_OVERRIDES.map((config) =>
 		configBooleanProperty({
 			displayName: config.displayName,
@@ -2396,7 +2388,7 @@ export class Codex implements INodeType {
 		},
 		inputs: ['main'],
 		outputs: ['main'],
-		credentials: [],
+		credentials: [{ name: 'codexApi', required: true }],
 		properties: [
 			{
 				displayName: 'Operation',
@@ -2582,17 +2574,30 @@ async function runCodex(
 		outputSchemaFile: preparedSchemaFile.path,
 	});
 
-	const codexBinaryPath =
-		((additionalOptions.codexBinaryPath as string) || '').trim() || 'codex';
+	const credentials = readCodexCredentials(await this.getCredentials('codexApi'));
 	const timeoutMs =
 		(((additionalOptions.timeout as number) || 600) as number) * 1000;
 
-	const env = buildCodexEnvironment(additionalOptions);
+	const temporaryHome = await prepareCodexHome(credentials);
+	const env = buildCodexEnvironment(additionalOptions, {
+		...credentials,
+		codexHome: temporaryHome.path,
+	});
 	const cwd = workingDirectory.trim() || undefined;
 	let processResult: CodexProcessResult;
 	let processErrorMessage: string | undefined;
 	try {
-		processResult = await spawnCodex(codexBinaryPath, args, cwd, env, timeoutMs);
+		if (credentials.authMethod === 'apiKey') {
+			await codexApiKeyLogin(credentials, env, timeoutMs);
+		}
+		processResult = await spawnCodex(
+			credentials.codexPath,
+			credentials.runAsUser,
+			args,
+			cwd,
+			env,
+			timeoutMs,
+		);
 	} catch (error) {
 		if (!(error instanceof CodexProcessError)) {
 			throw error;
@@ -2601,6 +2606,7 @@ async function runCodex(
 		processErrorMessage = error.message;
 	} finally {
 		await preparedSchemaFile.cleanup();
+		await temporaryHome.cleanup();
 	}
 
 	if (processErrorMessage !== undefined) {
@@ -4043,12 +4049,16 @@ async function prepareOutputSchemaFile(
 
 function buildCodexEnvironment(
 	additionalOptions: IDataObject,
+	credentials: CodexCredentials,
 ): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = { ...process.env };
-	env.HOME = env.HOME ?? homedir();
-	if (env.HOME && !env.CODEX_HOME) {
-		env.CODEX_HOME = join(env.HOME, '.codex');
+	if (env.HOME === undefined) {
+		env.HOME = homedir();
 	}
+	env.CODEX_HOME =
+		credentials.codexHome === ''
+			? join(env.HOME as string, '.codex')
+			: credentials.codexHome;
 	env.PATH = mergePathEntries(env.PATH, [
 		'/opt/homebrew/bin',
 		'/usr/local/bin',
@@ -4082,15 +4092,132 @@ function mergePathEntries(
 	return mergedEntries.join(':');
 }
 
+interface CodexCredentials {
+	codexPath: string;
+	runAsUser: string;
+	authMethod: string;
+	apiKey: string;
+	codexHome: string;
+}
+
+function readCodexCredentials(credentials: IDataObject): CodexCredentials {
+	const authMethod = credentialText(credentials.authMethod, 'Authentication');
+	if (authMethod !== 'chatgpt' && authMethod !== 'apiKey') {
+		throw new Error(`Unsupported Codex authentication method: ${authMethod}`);
+	}
+	const apiKey = credentialText(credentials.apiKey, 'API Key');
+	if (authMethod === 'apiKey' && apiKey === '') {
+		throw new Error('API Key is required when Authentication is "API Key"');
+	}
+	const codexPath = credentialText(credentials.codexPath, 'Codex Binary Path');
+	if (codexPath === '') {
+		throw new Error('Codex Binary Path is required');
+	}
+	return {
+		codexPath,
+		runAsUser: credentialText(credentials.runAsUser, 'Run As User'),
+		authMethod,
+		apiKey,
+		codexHome: credentialText(credentials.codexHome, 'Codex Home'),
+	};
+}
+
+function credentialText(value: unknown, label: string): string {
+	if (value === undefined || value === null) {
+		return '';
+	}
+	if (typeof value !== 'string') {
+		throw new Error(`${label} must be a string`);
+	}
+	return value.trim();
+}
+
+// API-key sign-in writes auth.json, so it gets its own throwaway home unless the
+// credential names one. ChatGPT sign-in reads the home that already holds auth.json.
+async function prepareCodexHome(
+	credentials: CodexCredentials,
+): Promise<{ path: string; cleanup: () => Promise<void> }> {
+	if (credentials.codexHome) {
+		return { path: credentials.codexHome, cleanup: async () => {} };
+	}
+	if (credentials.authMethod !== 'apiKey') {
+		return { path: '', cleanup: async () => {} };
+	}
+	const path = await fs.mkdtemp(join(tmpdir(), 'codex-home-'));
+	return {
+		path,
+		cleanup: async () => {
+			await fs.rm(path, { recursive: true, force: true });
+		},
+	};
+}
+
+function codexApiKeyLogin(
+	credentials: CodexCredentials,
+	env: NodeJS.ProcessEnv,
+	timeoutMs: number,
+): Promise<void> {
+	const { executable, args } = codexCommand(credentials.codexPath, credentials.runAsUser, [
+		'login',
+		'--with-api-key',
+	]);
+	return new Promise((resolve, reject) => {
+		const child = spawn(executable, args, {
+			env,
+			stdio: ['pipe', 'pipe', 'pipe'],
+		});
+		let stdout = '';
+		let stderr = '';
+		const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+
+		child.stdout?.on('data', (chunk: Buffer) => {
+			stdout += chunk.toString('utf8');
+		});
+		child.stderr?.on('data', (chunk: Buffer) => {
+			stderr += chunk.toString('utf8');
+		});
+		child.on('error', (err) =>
+			reject(new Error(`codex login --with-api-key failed: ${err.message}`)),
+		);
+		child.on('close', (code) => {
+			clearTimeout(timer);
+			if (code === 0) {
+				resolve();
+				return;
+			}
+			const detail = (stderr.trim() || stdout.trim()).slice(0, 2000);
+			reject(
+				new Error(
+					`codex login --with-api-key exited with code ${code}${detail ? `: ${detail}` : ''}`,
+				),
+			);
+		});
+		child.stdin?.end(credentials.apiKey);
+	});
+}
+
+function codexCommand(
+	binary: string,
+	runAsUser: string,
+	args: string[],
+): { executable: string; args: string[] } {
+	if (!runAsUser) {
+		return { executable: binary, args };
+	}
+	return { executable: 'sudo', args: ['-u', runAsUser, binary, ...args] };
+}
+
 function spawnCodex(
 	binary: string,
-	args: string[],
+	runAsUser: string,
+	commandArgs: string[],
 	cwd: string | undefined,
 	env: NodeJS.ProcessEnv,
 	timeoutMs: number,
 ): Promise<CodexProcessResult> {
+	const { executable, args } = codexCommand(binary, runAsUser, commandArgs);
 	return new Promise((resolve, reject) => {
-		const child = spawn(binary, args, {
+		const child = spawn(executable, args, {
 			cwd,
 			env,
 			stdio: ['ignore', 'pipe', 'pipe'],

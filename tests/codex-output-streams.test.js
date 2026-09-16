@@ -20,10 +20,13 @@ function makeMissingBinary() {
 	return path.join(dir, 'missing-codex');
 }
 
-function makeContext(params, continueOnFail) {
+function makeContext(params, continueOnFail, credentials) {
 	return {
 		getInputData() {
 			return [{ json: {} }];
+		},
+		async getCredentials() {
+			return credentials;
 		},
 		getNodeParameter(name, _itemIndex, fallback) {
 			return Object.prototype.hasOwnProperty.call(params, name)
@@ -39,14 +42,24 @@ function makeContext(params, continueOnFail) {
 	};
 }
 
-async function execute(params, continueOnFail = false) {
+async function execute(params, continueOnFail = false, credentials = {}) {
 	const node = new Codex();
-	const result = await node.execute.call(makeContext(params, continueOnFail));
+	const result = await node.execute.call(
+		makeContext(params, continueOnFail, {
+			codexPath: params.codexPath,
+			runAsUser: '',
+			authMethod: 'chatgpt',
+			apiKey: '',
+			codexHome: '',
+			...credentials,
+		}),
+	);
 	return result[0][0].json;
 }
 
 function baseParams(codexBinaryPath) {
 	return {
+		codexPath: codexBinaryPath,
 		prompt: 'Test prompt',
 		outputFormat: 'text',
 		model: '',
@@ -57,7 +70,6 @@ function baseParams(codexBinaryPath) {
 		approvalPolicy: 'never',
 		additionalOptions: {
 			timeout: 30,
-			codexBinaryPath,
 			skipGitRepoCheck: true,
 		},
 	};
@@ -117,4 +129,37 @@ exit 0
 	ignoreConfigParams.additionalOptions.ignoreUserConfig = true;
 	const ignoreConfigArgvOutput = await execute(ignoreConfigParams);
 	assert.match(ignoreConfigArgvOutput.stdout, /^--ignore-user-config$/m);
+	// API-key auth: the node signs in first, then runs codex exec in the same CODEX_HOME.
+	const authRecorder = makeScript(`#!/bin/sh
+if [ "$1" = "login" ]; then
+	read -r key
+	printf '%s' "$key" > "$CODEX_HOME/auth.json"
+	exit 0
+fi
+printf 'home=%s auth=%s\\n' "$CODEX_HOME" "$(cat "$CODEX_HOME/auth.json")"
+exit 0
+`);
+	const apiKeyOutput = await execute(baseParams(authRecorder.file), false, {
+		authMethod: 'apiKey',
+		apiKey: 'sk-test-key',
+	});
+	assert.match(apiKeyOutput.text, /^home=\S*codex-home-\S* auth=sk-test-key$/);
+
+	const missingKeyParams = baseParams(authRecorder.file);
+	const missingKeyOutput = await execute(missingKeyParams, true, {
+		authMethod: 'apiKey',
+		apiKey: '',
+	});
+	assert.match(missingKeyOutput.error, /API Key is required/);
+
+	const explicitHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-explicit-'));
+	const explicitHomeOutput = await execute(baseParams(authRecorder.file), false, {
+		authMethod: 'apiKey',
+		apiKey: 'sk-explicit',
+		codexHome: explicitHome,
+	});
+	assert.strictEqual(
+		explicitHomeOutput.text,
+		`home=${explicitHome} auth=sk-explicit`,
+	);
 })();
