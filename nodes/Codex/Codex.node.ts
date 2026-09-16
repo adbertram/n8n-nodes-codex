@@ -2575,6 +2575,11 @@ async function runCodex(
 
 	validateAdditionalOptions(additionalOptions);
 
+	const cancelSignal = this.getExecutionCancelSignal();
+	if (!cancelSignal) {
+		throw new Error('n8n did not provide the execution cancel signal');
+	}
+
 	const preparedSchemaFile = await prepareOutputSchemaFile(additionalOptions);
 	const args = buildCodexArgs({
 		prompt,
@@ -2613,6 +2618,7 @@ async function runCodex(
 			cwd,
 			env,
 			timeoutMs,
+			cancelSignal,
 		);
 	} catch (error) {
 		if (!(error instanceof CodexProcessError)) {
@@ -4198,16 +4204,13 @@ function codexApiKeyLogin(
 			env,
 			stdio: ['pipe', 'pipe', 'pipe'],
 		});
-		let stdout = '';
-		let stderr = '';
+		const stdoutChunks: Buffer[] = [];
+		const stderrChunks: Buffer[] = [];
 		const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
 
-		child.stdout?.on('data', (chunk: Buffer) => {
-			stdout += chunk.toString('utf8');
-		});
-		child.stderr?.on('data', (chunk: Buffer) => {
-			stderr += chunk.toString('utf8');
-		});
+		// Chunks are decoded once on close, so a character split across pipe reads survives.
+		child.stdout?.on('data', (chunk: Buffer) => stdoutChunks.push(chunk));
+		child.stderr?.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
 		child.on('error', (err) =>
 			reject(new Error(`codex login --with-api-key failed: ${err.message}`)),
 		);
@@ -4217,6 +4220,8 @@ function codexApiKeyLogin(
 				resolve();
 				return;
 			}
+			const stdout = Buffer.concat(stdoutChunks).toString('utf8');
+			const stderr = Buffer.concat(stderrChunks).toString('utf8');
 			const detail = (stderr.trim() || stdout.trim()).slice(0, 2000);
 			reject(
 				new Error(
@@ -4269,6 +4274,7 @@ function spawnCodex(
 	cwd: string | undefined,
 	env: NodeJS.ProcessEnv,
 	timeoutMs: number,
+	cancelSignal: AbortSignal,
 ): Promise<CodexProcessResult> {
 	const { executable, args } = sandboxedCodexCommand(
 		binary,
@@ -4276,6 +4282,9 @@ function spawnCodex(
 		sandboxProfile,
 		commandArgs,
 	);
+	if (cancelSignal.aborted) {
+		throw new Error('codex was not started: the execution was canceled');
+	}
 	return new Promise((resolve, reject) => {
 		const child = spawn(executable, args, {
 			cwd,
@@ -4285,9 +4294,10 @@ function spawnCodex(
 			detached: true,
 		});
 
-		let stdout = '';
-		let stderr = '';
+		const stdoutChunks: Buffer[] = [];
+		const stderrChunks: Buffer[] = [];
 		let timedOut = false;
+		let canceled = false;
 		let closeGrace: NodeJS.Timeout | undefined;
 
 		const killGroup = () => {
@@ -4303,12 +4313,20 @@ function spawnCodex(
 			killGroup();
 		}, timeoutMs);
 
-		child.stdout?.on('data', (chunk: Buffer) => {
-			stdout += chunk.toString('utf8');
-		});
-		child.stderr?.on('data', (chunk: Buffer) => {
-			stderr += chunk.toString('utf8');
-		});
+		// n8n aborts this signal when the execution is canceled; Codex's process group
+		// goes with it, so a canceled execution leaves nothing running.
+		const cancel = () => {
+			canceled = true;
+			killGroup();
+			child.stdout?.destroy();
+			child.stderr?.destroy();
+		};
+		cancelSignal.addEventListener('abort', cancel, { once: true });
+
+		// Chunks are decoded once on close, so a character split across pipe reads survives.
+		child.stdout?.on('data', (chunk: Buffer) => stdoutChunks.push(chunk));
+		child.stderr?.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
+		const decode = (chunks: Buffer[]) => Buffer.concat(chunks).toString('utf8');
 
 		child.on('exit', () => {
 			// A descendant can keep the output pipes open after Codex exits, even one
@@ -4325,10 +4343,11 @@ function spawnCodex(
 		child.on('error', (err) => {
 			clearTimeout(timer);
 			clearTimeout(closeGrace);
+			cancelSignal.removeEventListener('abort', cancel);
 			reject(
 				new CodexProcessError(`Failed to spawn Codex process: ${err.message}`, {
-					stdout,
-					stderr,
+					stdout: decode(stdoutChunks),
+					stderr: decode(stderrChunks),
 					exitCode: null,
 					signal: null,
 					timedOut: false,
@@ -4340,6 +4359,21 @@ function spawnCodex(
 		child.on('close', (code, signal) => {
 			clearTimeout(timer);
 			clearTimeout(closeGrace);
+			cancelSignal.removeEventListener('abort', cancel);
+			const stdout = decode(stdoutChunks);
+			const stderr = decode(stderrChunks);
+			if (canceled) {
+				return reject(
+					new CodexProcessError('codex was killed: the execution was canceled', {
+						stdout,
+						stderr,
+						exitCode: null,
+						signal,
+						timedOut: false,
+						processError: null,
+					}),
+				);
+			}
 			if (timedOut) {
 				return reject(
 					new CodexProcessError(`codex timed out after ${timeoutMs / 1000}s`, {

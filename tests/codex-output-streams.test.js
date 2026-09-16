@@ -20,8 +20,11 @@ function makeMissingBinary() {
 	return path.join(dir, 'missing-codex');
 }
 
-function makeContext(params, continueOnFail, credentials) {
+function makeContext(params, continueOnFail, credentials, cancelSignal) {
 	return {
+		getExecutionCancelSignal() {
+			return cancelSignal;
+		},
 		getInputData() {
 			return [{ json: {} }];
 		},
@@ -42,17 +45,27 @@ function makeContext(params, continueOnFail, credentials) {
 	};
 }
 
-async function execute(params, continueOnFail = false, credentials = {}) {
+async function execute(
+	params,
+	continueOnFail = false,
+	credentials = {},
+	cancelSignal = new AbortController().signal,
+) {
 	const node = new Codex();
 	const result = await node.execute.call(
-		makeContext(params, continueOnFail, {
-			codexPath: params.codexPath,
-			runAsUser: '',
-			authMethod: 'chatgpt',
-			apiKey: '',
-			codexHome: '',
-			...credentials,
-		}),
+		makeContext(
+			params,
+			continueOnFail,
+			{
+				codexPath: params.codexPath,
+				runAsUser: '',
+				authMethod: 'chatgpt',
+				apiKey: '',
+				codexHome: '',
+				...credentials,
+			},
+			cancelSignal,
+		),
 	);
 	return result[0][0].json;
 }
@@ -91,6 +104,20 @@ exit 0
 		timedOut: false,
 		processError: null,
 	});
+
+	// A multi-byte character that straddles a pipe read survives on both streams.
+	// One write per stream, so the em dash's bytes land across a 65536-byte read.
+	const straddler = makeScript(`#!${process.execPath}
+const text = 'a'.repeat(65535) + '\\u2014' + 'b'.repeat(1000);
+require('fs').writeSync(1, text);
+require('fs').writeSync(2, text);
+`);
+	const straddlerOutput = await execute(baseParams(straddler.file));
+	for (const stream of [straddlerOutput.stdout, straddlerOutput.stderr]) {
+		assert.strictEqual(stream.split('\u2014').length - 1, 1);
+		assert.strictEqual(stream.includes('\uFFFD'), false);
+		assert.strictEqual(stream.length, 66536);
+	}
 
 	const failure = makeScript(`#!/bin/sh
 printf 'failure stdout\\n'
@@ -214,6 +241,50 @@ wait
 		() => process.kill(Number(fs.readFileSync(marker, 'utf8').trim()), 0),
 		{ code: 'ESRCH' },
 	);
+
+	// Canceling the execution kills every process Codex started and the node settles.
+	const waitForFile = async (file) => {
+		const deadline = Date.now() + 10000;
+		while (!fs.existsSync(file) || fs.readFileSync(file, 'utf8').trim() === '') {
+			assert.ok(Date.now() < deadline, `${file} was never written`);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+	};
+	const cancelMarker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'codex-cancel-')), 'pid');
+	const cancelable = makeScript(`#!/bin/sh
+sleep 300 &
+echo $! > "${cancelMarker}"
+wait
+`);
+	const cancelController = new AbortController();
+	const cancelRun = execute(baseParams(cancelable.file), false, {}, cancelController.signal);
+	await waitForFile(cancelMarker);
+	const canceledAt = Date.now();
+	cancelController.abort();
+	const cancelOutput = await cancelRun;
+	const cancelElapsed = Date.now() - canceledAt;
+	assert.match(cancelOutput.error, /codex was killed: the execution was canceled/);
+	assert.strictEqual(cancelOutput.timedOut, false);
+	assert.ok(cancelElapsed < 2000, `settled ${cancelElapsed}ms after the cancel`);
+	assert.throws(
+		() => process.kill(Number(fs.readFileSync(cancelMarker, 'utf8').trim()), 0),
+		{ code: 'ESRCH' },
+	);
+
+	// An execution canceled before the node runs starts no Codex process.
+	const preCancelMarker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'codex-precancel-')), 'ran');
+	const preCancelController = new AbortController();
+	preCancelController.abort();
+	await assert.rejects(
+		execute(
+			baseParams(makeScript(`#!/bin/sh\ntouch "${preCancelMarker}"\n`).file),
+			false,
+			{},
+			preCancelController.signal,
+		),
+		/codex was not started: the execution was canceled/,
+	);
+	assert.strictEqual(fs.existsSync(preCancelMarker), false);
 
 	// Environment JSON must be an object whose values are strings.
 	const notObjectParams = baseParams(envPrinter.file);
