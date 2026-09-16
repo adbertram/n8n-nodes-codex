@@ -2265,6 +2265,15 @@ const ADDITIONAL_OPTION_PROPERTIES: INodeProperties[] = [
 		description:
 			'Advanced escape hatch for additional -c key=value overrides. String values must include TOML quotes.',
 	}),
+	{
+		displayName: 'Environment JSON',
+		name: 'environment',
+		type: 'json',
+		default: '',
+		placeholder: '{"HOME": "/path/to/run/home"}',
+		description:
+			'JSON object of environment variables for Codex, applied after every other variable the node sets, including CODEX_HOME and Environment Variables',
+	},
 	fixedCollectionProperty({
 		displayName: 'Environment Variables',
 		name: 'envVars',
@@ -2325,6 +2334,12 @@ const ADDITIONAL_OPTION_PROPERTIES: INodeProperties[] = [
 		'Output Schema File',
 		'outputSchemaFile',
 		'Existing JSON Schema file passed to --output-schema',
+	),
+	stringProperty(
+		'Sandbox Profile',
+		'sandboxProfile',
+		'macOS sandbox-exec profile (SBPL). When set, Codex runs under /usr/bin/sandbox-exec with this profile, so it can write only where the profile allows. Cannot be combined with Run As User.',
+		{ typeOptions: { rows: 4 } },
 	),
 	stringProperty(
 		'Profile',
@@ -2593,6 +2608,7 @@ async function runCodex(
 		processResult = await spawnCodex(
 			credentials.codexPath,
 			credentials.runAsUser,
+			stringOption(additionalOptions.sandboxProfile),
 			args,
 			cwd,
 			env,
@@ -4075,7 +4091,23 @@ function buildCodexEnvironment(
 			if (v && v.name) env[v.name] = v.value ?? '';
 		}
 	}
-	return env;
+	return { ...env, ...readEnvironmentJson(additionalOptions.environment) };
+}
+
+function readEnvironmentJson(value: unknown): Record<string, string> {
+	if (value === undefined || value === null || value === '') {
+		return {};
+	}
+	const parsed: unknown = typeof value === 'string' ? JSON.parse(value) : value;
+	if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+		throw new Error('Environment JSON must be a JSON object');
+	}
+	for (const [name, entry] of Object.entries(parsed)) {
+		if (typeof entry !== 'string') {
+			throw new Error(`Environment variable ${name} must be a string`);
+		}
+	}
+	return parsed as Record<string, string>;
 }
 
 function mergePathEntries(
@@ -4207,32 +4239,68 @@ function codexCommand(
 	return { executable: 'sudo', args: ['-u', runAsUser, binary, ...args] };
 }
 
+// How long a Codex process that has exited may keep its stdout/stderr open through a
+// descendant before that descendant's process group is killed.
+const CLOSE_GRACE_MS = 5000;
+
+function sandboxedCodexCommand(
+	binary: string,
+	runAsUser: string,
+	sandboxProfile: string,
+	args: string[],
+): { executable: string; args: string[] } {
+	if (!sandboxProfile) {
+		return codexCommand(binary, runAsUser, args);
+	}
+	if (runAsUser) {
+		throw new Error('Sandbox Profile cannot be combined with Run As User');
+	}
+	return {
+		executable: '/usr/bin/sandbox-exec',
+		args: ['-p', sandboxProfile, binary, ...args],
+	};
+}
+
 function spawnCodex(
 	binary: string,
 	runAsUser: string,
+	sandboxProfile: string,
 	commandArgs: string[],
 	cwd: string | undefined,
 	env: NodeJS.ProcessEnv,
 	timeoutMs: number,
 ): Promise<CodexProcessResult> {
-	const { executable, args } = codexCommand(binary, runAsUser, commandArgs);
+	const { executable, args } = sandboxedCodexCommand(
+		binary,
+		runAsUser,
+		sandboxProfile,
+		commandArgs,
+	);
 	return new Promise((resolve, reject) => {
 		const child = spawn(executable, args, {
 			cwd,
 			env,
 			stdio: ['ignore', 'pipe', 'pipe'],
+			// Its own process group, so a timeout reaches every descendant Codex started.
+			detached: true,
 		});
 
 		let stdout = '';
 		let stderr = '';
 		let timedOut = false;
+		let closeGrace: NodeJS.Timeout | undefined;
+
+		const killGroup = () => {
+			try {
+				process.kill(-(child.pid as number), 'SIGKILL');
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+			}
+		};
 
 		const timer = setTimeout(() => {
 			timedOut = true;
-			child.kill('SIGTERM');
-			setTimeout(() => {
-				if (!child.killed) child.kill('SIGKILL');
-			}, 5000);
+			killGroup();
 		}, timeoutMs);
 
 		child.stdout?.on('data', (chunk: Buffer) => {
@@ -4242,8 +4310,13 @@ function spawnCodex(
 			stderr += chunk.toString('utf8');
 		});
 
+		child.on('exit', () => {
+			closeGrace = setTimeout(killGroup, CLOSE_GRACE_MS);
+		});
+
 		child.on('error', (err) => {
 			clearTimeout(timer);
+			clearTimeout(closeGrace);
 			reject(
 				new CodexProcessError(`Failed to spawn Codex process: ${err.message}`, {
 					stdout,
@@ -4258,6 +4331,7 @@ function spawnCodex(
 
 		child.on('close', (code, signal) => {
 			clearTimeout(timer);
+			clearTimeout(closeGrace);
 			if (timedOut) {
 				return reject(
 					new CodexProcessError(`codex timed out after ${timeoutMs / 1000}s`, {

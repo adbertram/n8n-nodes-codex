@@ -121,6 +121,12 @@ This node executes `codex exec` on the n8n server or inside the n8n container. T
 - Avoid putting secrets such as API keys in the node's `Environment Variables` parameter. Prefer host or container environment configuration, mounted Codex configuration, or your platform's secret management.
 - Make sure workflow users understand which filesystem paths the n8n process can access.
 
+### Confining a run on macOS
+
+- **Sandbox Profile** takes a `sandbox-exec` profile (SBPL). When set, the node runs `/usr/bin/sandbox-exec -p <profile> codex exec ...`, so Codex can write only where the profile allows. It cannot be combined with **Run As User**. Codex's own sandbox cannot be applied inside it, so pair it with `Danger Full Access`.
+- **Environment JSON** takes a JSON object of string variables applied after every other variable the node sets, including `CODEX_HOME`. Use it for a per-run `HOME`, `CODEX_HOME` or `TMPDIR`.
+- Every run gets its own process group. A timeout kills the whole group, and a Codex process that exits while a descendant still holds its output gets five seconds before the group is killed.
+
 ## Development
 
 Install dependencies:

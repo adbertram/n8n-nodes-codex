@@ -162,4 +162,56 @@ exit 0
 		explicitHomeOutput.text,
 		`home=${explicitHome} auth=sk-explicit`,
 	);
+
+	// Environment JSON is applied after CODEX_HOME and the Environment Variables collection.
+	const envPrinter = makeScript(`#!/bin/sh
+printf '%s|%s\\n' "$CODEX_HOME" "$RUN_MARKER"
+exit 0
+`);
+	const environmentParams = baseParams(envPrinter.file);
+	environmentParams.additionalOptions.envVars = {
+		env: [{ name: 'RUN_MARKER', value: 'collection' }],
+	};
+	environmentParams.additionalOptions.environment =
+		'{"CODEX_HOME": "/run/codex-home", "RUN_MARKER": "json"}';
+	const environmentOutput = await execute(environmentParams);
+	assert.strictEqual(environmentOutput.text, '/run/codex-home|json');
+
+	// A sandbox profile confines where Codex may write.
+	const allowed = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'codex-allowed-')));
+	const denied = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'codex-denied-')));
+	const writer = makeScript(`#!/bin/sh
+touch "${allowed}/ok"
+touch "${denied}/no"
+exit 0
+`);
+	const sandboxParams = baseParams(writer.file);
+	sandboxParams.additionalOptions.sandboxProfile = [
+		'(version 1)',
+		'(allow default)',
+		'(deny file-write*)',
+		`(allow file-write* (subpath "${allowed}") (literal "/dev/null"))`,
+	].join('\n');
+	await execute(sandboxParams);
+	assert.strictEqual(fs.existsSync(path.join(allowed, 'ok')), true);
+	assert.strictEqual(fs.existsSync(path.join(denied, 'no')), false);
+
+	const sandboxAsUser = await execute(sandboxParams, true, { runAsUser: 'someone' });
+	assert.match(sandboxAsUser.error, /cannot be combined with Run As User/);
+
+	// A timeout kills every process Codex started, not only Codex.
+	const marker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'codex-grandchild-')), 'pid');
+	const spawner = makeScript(`#!/bin/sh
+sleep 300 &
+echo $! > "${marker}"
+wait
+`);
+	const timeoutParams = baseParams(spawner.file);
+	timeoutParams.additionalOptions.timeout = 1;
+	const timeoutOutput = await execute(timeoutParams);
+	assert.strictEqual(timeoutOutput.timedOut, true);
+	assert.throws(
+		() => process.kill(Number(fs.readFileSync(marker, 'utf8').trim()), 0),
+		{ code: 'ESRCH' },
+	);
 })();
